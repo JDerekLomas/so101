@@ -1,0 +1,11 @@
+{
+  "id": "1778723222_disconnected",
+  "from": "robot",
+  "to": "kb",
+  "type": "disconnected",
+  "ts": 1778723222.104241,
+  "payload": {
+    "port": "/dev/tty.usbmodem5B141123331",
+    "role": null
+  }
+}

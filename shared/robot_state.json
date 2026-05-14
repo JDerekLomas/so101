@@ -1,31 +1,197 @@
 {
   "_schema": "robot_state/v1",
-  "_updated": 1778752725.679536,
-  "connection": {},
+  "_updated": 1778766851.3827982,
+  "connection": {
+    "leader": {
+      "port": "/dev/tty.usbmodem5B141116761",
+      "connected": true,
+      "motor_count": 6,
+      "packet_errors": 0
+    },
+    "follower": {
+      "port": "/dev/tty.usbmodem5B141123331",
+      "connected": true,
+      "motor_count": 6,
+      "packet_errors": 0
+    }
+  },
   "motors": {
-    "follower": {},
-    "leader": {}
+    "follower": {
+      "shoulder_pan": {
+        "id": 1,
+        "position": 2429,
+        "temperature": 32,
+        "load": 0
+      },
+      "shoulder_lift": {
+        "id": 2,
+        "position": 902,
+        "temperature": 33,
+        "load": 0
+      },
+      "elbow_flex": {
+        "id": 3,
+        "position": 110,
+        "temperature": 37,
+        "load": 0
+      },
+      "wrist_flex": {
+        "id": 4,
+        "position": 2806,
+        "temperature": 34,
+        "load": 0
+      },
+      "wrist_roll": {
+        "id": 5,
+        "position": 2540,
+        "temperature": 37,
+        "load": 0
+      },
+      "gripper": {
+        "id": 6,
+        "position": 1357,
+        "temperature": 36,
+        "load": 0
+      }
+    },
+    "leader": {
+      "shoulder_pan": {
+        "id": 1,
+        "position": 2336,
+        "temperature": 0,
+        "load": 0
+      },
+      "shoulder_lift": {
+        "id": 2,
+        "position": 932,
+        "temperature": 0,
+        "load": 0
+      },
+      "elbow_flex": {
+        "id": 3,
+        "position": 4058,
+        "temperature": 0,
+        "load": 0
+      },
+      "wrist_flex": {
+        "id": 4,
+        "position": 2939,
+        "temperature": 0,
+        "load": 0
+      },
+      "wrist_roll": {
+        "id": 5,
+        "position": 1020,
+        "temperature": 0,
+        "load": 0
+      },
+      "gripper": {
+        "id": 6,
+        "position": 1848,
+        "temperature": 0,
+        "load": 0
+      }
+    }
   },
   "calibration": {
-    "recording": false,
+    "recording": true,
     "follower_file": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
     "leader_file": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
     "last_saved": null
   },
+  "teleop_active": false,
   "events": [
     {
-      "ts": 1778723222.104238,
-      "kind": "disconnected",
+      "ts": 1778766828.5042372,
+      "kind": "teleop_collision_cleared",
       "detail": {
-        "port": "/dev/tty.usbmodem5B141123331",
-        "role": null
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 132
       }
     },
     {
-      "ts": 1778752635.0602329,
-      "kind": "scan_complete",
+      "ts": 1778766828.806808,
+      "kind": "teleop_collision",
       "detail": {
-        "board_count": 0
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 788,
+        "frozen_at": 163
+      }
+    },
+    {
+      "ts": 1778766830.89798,
+      "kind": "teleop_collision_cleared",
+      "detail": {
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 88
+      }
+    },
+    {
+      "ts": 1778766831.158746,
+      "kind": "teleop_collision",
+      "detail": {
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 908,
+        "frozen_at": 164
+      }
+    },
+    {
+      "ts": 1778766833.509803,
+      "kind": "teleop_collision_cleared",
+      "detail": {
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 124
+      }
+    },
+    {
+      "ts": 1778766833.8117352,
+      "kind": "teleop_collision",
+      "detail": {
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 1000,
+        "frozen_at": 167
+      }
+    },
+    {
+      "ts": 1778766836.143203,
+      "kind": "teleop_collision_cleared",
+      "detail": {
+        "motor": 3,
+        "name": "elbow_flex",
+        "load": 132
+      }
+    },
+    {
+      "ts": 1778766836.3552399,
+      "kind": "teleop_stopped",
+      "detail": {}
+    },
+    {
+      "ts": 1778766847.603178,
+      "kind": "move_start",
+      "detail": {
+        "label": "follower",
+        "positions": {
+          "1": 2224,
+          "2": 1300
+        }
+      }
+    },
+    {
+      "ts": 1778766850.105261,
+      "kind": "move_complete",
+      "detail": {
+        "label": "follower",
+        "positions": {
+          "1": 2224,
+          "2": 1300
+        }
       }
     }
   ]

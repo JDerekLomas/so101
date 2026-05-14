@@ -1,0 +1,22 @@
+{
+  "generated": 1778754600,
+  "note": "Range-of-motion sweep 2026-05-14. Ports: follower=5B141123331, leader=5B141116761 (confirmed wiggle test). Labels may swap on replug — verify before writing to calibration files.",
+  "ranges": {
+    "follower": {
+      "shoulder_pan":  {"min": 1408, "max": 3390},
+      "shoulder_lift": {"min":  676, "max": 3110},
+      "elbow_flex":    {"min":    2, "max": 4088},
+      "wrist_flex":    {"min": 1065, "max": 3339},
+      "wrist_roll":    {"min":   10, "max": 3994},
+      "gripper":       {"min": 1367, "max": 2662}
+    },
+    "leader": {
+      "shoulder_pan":  {"min":  741, "max": 3278},
+      "shoulder_lift": {"min":  930, "max": 3369},
+      "elbow_flex":    {"min": 1858, "max": 4059},
+      "wrist_flex":    {"min":  879, "max": 2437},
+      "wrist_roll":    {"min":    8, "max": 4090},
+      "gripper":       {"min": 1845, "max": 3048}
+    }
+  }
+}

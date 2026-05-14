@@ -1,0 +1,10 @@
+{
+  "id": "1778752635_scan_complete",
+  "from": "robot",
+  "to": "kb",
+  "type": "scan_complete",
+  "ts": 1778752635.060235,
+  "payload": {
+    "board_count": 0
+  }
+}

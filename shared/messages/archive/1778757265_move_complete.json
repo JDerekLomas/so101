@@ -1,0 +1,13 @@
+{
+  "id": "1778757265_move_complete",
+  "from": "robot",
+  "to": "kb",
+  "type": "move_complete",
+  "ts": 1778757265.2030568,
+  "payload": {
+    "label": "follower",
+    "positions": {
+      "6": 1454
+    }
+  }
+}

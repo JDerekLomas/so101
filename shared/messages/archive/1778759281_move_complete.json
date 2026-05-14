@@ -1,0 +1,14 @@
+{
+  "id": "1778759281_move_complete",
+  "from": "robot",
+  "to": "kb",
+  "type": "move_complete",
+  "ts": 1778759281.445468,
+  "payload": {
+    "label": "follower",
+    "positions": {
+      "1": 1800
+    },
+    "ramped": true
+  }
+}

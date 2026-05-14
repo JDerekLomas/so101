@@ -1,0 +1,10 @@
+{
+  "id": "1778759667_teleop_started",
+  "from": "robot",
+  "to": "kb",
+  "type": "teleop_started",
+  "ts": 1778759667.634573,
+  "payload": {
+    "phase": "equalizing"
+  }
+}

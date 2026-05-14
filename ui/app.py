@@ -42,6 +42,8 @@ PRESENT_SPEED_ADDR   = 58
 TORQUE_ENABLE_ADDR   = 40
 TEMPERATURE_ADDR     = 63
 LOAD_ADDR            = 60
+P_GAIN_ADDR          = 29
+D_GAIN_ADDR          = 27
 PING_INTERVAL        = 0.05
 STATE_WRITE_INTERVAL = 0.5   # write shared state at 2 Hz
 AUTO_SCAN_INTERVAL   = 3.0   # check for new/gone boards every 3s
@@ -586,6 +588,7 @@ def poll_loop():
             for path, board in list(boards.items()):
                 try:
                     ph, handler, ids = board["ph"], board["handler"], board["ids"]
+                    ph.is_using = False  # reset stale port lock from prior cycle
                     for mid in ids:
                         pos = read_register(ph, handler, mid, PRESENT_POSITION_ADDR, 2)
                         if pos is not None:
@@ -759,6 +762,17 @@ def poll_loop():
                             "pos": current_pos, "target": target_pos,
                             "error": int(error), "speed": speed, "lvel": leader_vel,
                         }
+
+                    # ── Reset port state before writes ─────────────────────
+                    # The SDK's txPacket() checks port.is_using and returns
+                    # COMM_PORT_BUSY if True. After read retries/exceptions,
+                    # is_using can be left True permanently. We're inside
+                    # state_lock so no other thread can be using this port.
+                    ph.is_using = False
+                    try:
+                        ph.ser.reset_input_buffer()  # flush stale RX from reads
+                    except Exception:
+                        pass
 
                     # ── Write speeds via GroupSyncWrite (broadcast, no ACK) ──
                     if speeds and SDK_AVAILABLE:
@@ -2048,6 +2062,7 @@ def api_move():
         return jsonify({"error": f"no board found for label '{label}'"}), 404
 
     ramped = data.get("ramped", False)
+    is_leader = (label == "leader")
 
     # Set move grace period — suppress stall detection while motor escapes high-load zone
     grace_until = time.time() + MOVE_GRACE_S
@@ -2059,6 +2074,12 @@ def api_move():
         def _ramped_move():
             with state_lock:
                 ph, handler = board["ph"], board["handler"]
+                # Leader has P=0 D=0 (passive arm) — set temporary PID gains so it tracks
+                if is_leader:
+                    for mid in positions:
+                        if mid in board["ids"]:
+                            write_register(ph, handler, mid, P_GAIN_ADDR, 32, length=1)
+                            write_register(ph, handler, mid, D_GAIN_ADDR, 32, length=1)
                 for mid in positions:
                     if mid in board["ids"]:
                         board["safety_disabled"][mid] = False
@@ -2111,6 +2132,12 @@ def api_move():
                 for mid in positions:
                     if mid in board["ids"]:
                         write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+                # Restore leader PID gains to passive (P=0, D=0)
+                if is_leader:
+                    for mid in positions:
+                        if mid in board["ids"]:
+                            write_register(ph, handler, mid, P_GAIN_ADDR, 0, length=1)
+                            write_register(ph, handler, mid, D_GAIN_ADDR, 0, length=1)
             result = {"label": label, "positions": positions, "ramped": True}
             if collided:
                 result["collisions"] = {ID_NAMES.get(k, str(k)): v for k, v in collided.items()}
@@ -2124,6 +2151,12 @@ def api_move():
     results = {}
     with state_lock:
         ph, handler = board["ph"], board["handler"]
+        # Leader has P=0 D=0 (passive arm) — set temporary PID gains so it tracks
+        if is_leader:
+            for mid in positions:
+                if mid in board["ids"]:
+                    write_register(ph, handler, mid, P_GAIN_ADDR, 32, length=1)
+                    write_register(ph, handler, mid, D_GAIN_ADDR, 32, length=1)
         for mid, goal in positions.items():
             if mid not in board["ids"]:
                 results[mid] = "skipped (not found)"
@@ -2141,6 +2174,12 @@ def api_move():
             ph, handler = board["ph"], board["handler"]
             for mid in positions:
                 write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+            # Restore leader PID gains to passive (P=0, D=0)
+            if is_leader:
+                for mid in positions:
+                    if mid in board["ids"]:
+                        write_register(ph, handler, mid, P_GAIN_ADDR, 0, length=1)
+                        write_register(ph, handler, mid, D_GAIN_ADDR, 0, length=1)
         push_event("move_complete", {"label": label, "positions": positions})
 
     threading.Thread(target=_disable_torque, daemon=True).start()

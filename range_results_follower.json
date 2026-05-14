@@ -1,0 +1,30 @@
+{
+  "timestamp": 1778757986.785829,
+  "arm": "follower",
+  "ranges": {
+    "shoulder_pan": {
+      "min": 934,
+      "max": 3534
+    },
+    "shoulder_lift": {
+      "min": 687,
+      "max": 3101
+    },
+    "elbow_flex": {
+      "min": 24,
+      "max": 4051
+    },
+    "wrist_flex": {
+      "min": 974,
+      "max": 3154
+    },
+    "wrist_roll": {
+      "min": 27,
+      "max": 3892
+    },
+    "gripper": {
+      "min": 1368,
+      "max": 2851
+    }
+  }
+}

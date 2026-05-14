@@ -14,14 +14,14 @@
       "id": 2,
       "drive_mode": 0,
       "homing_offset": 1545,
-      "range_min": 659,
-      "range_max": 3110
+      "range_min": 700,
+      "range_max": 1500
     },
     "elbow_flex": {
       "id": 3,
       "drive_mode": 0,
       "homing_offset": -156,
-      "range_min": 267,
+      "range_min": 269,
       "range_max": 4093
     },
     "wrist_flex": {
@@ -35,7 +35,7 @@
       "id": 5,
       "drive_mode": 0,
       "homing_offset": 1113,
-      "range_min": 2061,
+      "range_min": 2035,
       "range_max": 4069
     },
     "gripper": {

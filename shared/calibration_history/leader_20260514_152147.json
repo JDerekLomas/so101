@@ -1,0 +1,46 @@
+{
+    "_backup_of": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
+    "_timestamp": "20260514_152147",
+    "shoulder_pan": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": 1142,
+        "range_min": 744,
+        "range_max": 3292
+    },
+    "shoulder_lift": {
+        "id": 2,
+        "drive_mode": 0,
+        "homing_offset": -1431,
+        "range_min": 930,
+        "range_max": 3369
+    },
+    "elbow_flex": {
+        "id": 3,
+        "drive_mode": 0,
+        "homing_offset": 837,
+        "range_min": 1858,
+        "range_max": 4064
+    },
+    "wrist_flex": {
+        "id": 4,
+        "drive_mode": 0,
+        "homing_offset": 1297,
+        "range_min": 882,
+        "range_max": 3227
+    },
+    "wrist_roll": {
+        "id": 5,
+        "drive_mode": 0,
+        "homing_offset": 1841,
+        "range_min": 2,
+        "range_max": 4080
+    },
+    "gripper": {
+        "id": 6,
+        "drive_mode": 0,
+        "homing_offset": 535,
+        "range_min": 1846,
+        "range_max": 3029
+    }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "1778753961_connected",
+  "from": "robot",
+  "to": "kb",
+  "type": "connected",
+  "ts": 1778753961.044162,
+  "payload": {
+    "port": "/dev/tty.usbmodem5B141123331",
+    "motor_count": 6
+  }
+}

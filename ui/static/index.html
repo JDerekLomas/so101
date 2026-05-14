@@ -261,6 +261,7 @@
   .notif-btn.primary { background: #4c1d95; color: #e9d5ff; border-color: #6d28d9; }
   .notif-btn:hover { opacity: 0.8; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
 
@@ -269,6 +270,8 @@
 
 <div class="tabs">
   <button class="tab active" onclick="switchTab('status')">Status</button>
+  <button class="tab" onclick="switchTab('model')">3D Model</button>
+  <button class="tab" onclick="switchTab('camera')">Camera</button>
   <button class="tab" onclick="switchTab('ports')">Ports</button>
   <button class="tab" onclick="switchTab('calibrate')">Calibrate</button>
 </div>
@@ -286,6 +289,36 @@
   <div id="temp-warning" style="display:none;background:#7f1d1d;color:#fca5a5;padding:6px 10px;border-radius:4px;margin-bottom:8px;font-size:13px"></div>
   <div id="status-arms" class="status-arms"></div>
   <div id="status-events" class="status-events"></div>
+</div>
+
+<!-- ============================================================ -->
+<!-- 3D MODEL TAB                                                  -->
+<!-- ============================================================ -->
+<div id="panel-model" class="panel">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <label style="font-size:12px;color:#aaa">
+      <input type="checkbox" id="model-show-leader" checked onchange="modelSetShowLeader(this.checked)"> Show leader
+    </label>
+    <label style="font-size:12px;color:#aaa;margin-left:12px">
+      <input type="checkbox" id="model-show-follower" checked onchange="modelSetShowFollower(this.checked)"> Show follower
+    </label>
+    <span id="model-status" style="margin-left:auto;font-size:12px;color:#555"></span>
+  </div>
+  <canvas id="model-canvas" style="width:100%;height:480px;border-radius:6px;background:#0d0d0d;display:block"></canvas>
+</div>
+
+<!-- ============================================================ -->
+<!-- CAMERA TAB                                                    -->
+<!-- ============================================================ -->
+<div id="panel-camera" class="panel">
+  <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center">
+    <span id="camera-status-dot" style="width:10px;height:10px;border-radius:50%;background:#555;display:inline-block"></span>
+    <span id="camera-status-text" style="font-size:13px;color:#aaa">Checking camera…</span>
+  </div>
+  <img id="camera-img" src="/camera/stream"
+       style="width:100%;max-width:640px;border-radius:6px;border:1px solid #333;display:block"
+       onerror="document.getElementById('camera-status-text').textContent='Camera unavailable'"
+       onload="document.getElementById('camera-status-dot').style.background='#22c55e';document.getElementById('camera-status-text').textContent='Live'" />
 </div>
 
 <!-- ============================================================ -->
@@ -340,7 +373,7 @@ let lastCal       = { active: false, ranges: {} };
 // ---------------------------------------------------------------- //
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((t, i) => {
-    t.classList.toggle("active", ["status","ports","calibrate"][i] === name);
+    t.classList.toggle("active", ["status","model","camera","ports","calibrate"][i] === name);
   });
   document.querySelectorAll(".panel").forEach(p => {
     p.classList.toggle("active", p.id === "panel-" + name);
@@ -513,6 +546,16 @@ es.onmessage = e => {
     updateTempWarning(data.boards || {});
   } catch {}
 };
+
+// Feed 3D model from /api/state — only when tab is visible, 5 Hz
+setInterval(async () => {
+  if (!document.getElementById("panel-model")?.classList.contains("active")) return;
+  try {
+    const r = await fetch("/api/state");
+    const s = await r.json();
+    if (window.modelUpdate) window.modelUpdate(s.motors);
+  } catch {}
+}, 200);
 es.onerror = () => setStatus("port", "Stream disconnected.", "err");
 
 // ---------------------------------------------------------------- //
@@ -852,5 +895,287 @@ async function notifAction(id, trigger) {
 </script>
 
 <div id="notif-panel"></div>
+
+<script>
+// ================================================================ //
+// 3D ARM MODEL                                                      //
+// ================================================================ //
+(function() {
+  const CAL = {
+    follower: {
+      shoulder_pan:  { min: 917,  max: 3660 },
+      shoulder_lift: { min: 659,  max: 3110 },
+      elbow_flex:    { min: 15,   max: 4071 },
+      wrist_flex:    { min: 945,  max: 3339 },
+      wrist_roll:    { min: 6,    max: 4069 },
+      gripper:       { min: 1323, max: 2862 },
+    },
+    leader: {
+      shoulder_pan:  { min: 744,  max: 3292 },
+      shoulder_lift: { min: 930,  max: 3369 },
+      elbow_flex:    { min: 1858, max: 4064 },
+      wrist_flex:    { min: 882,  max: 3227 },
+      wrist_roll:    { min: 2,    max: 4065 },
+      gripper:       { min: 1846, max: 3029 },
+    }
+  };
+
+  // Map raw servo count to [-1, 1]
+  function norm(raw, cal) {
+    const span = cal.max - cal.min;
+    if (span === 0) return 0;
+    return ((raw - cal.min) / span) * 2 - 1;
+  }
+
+  let scene, camera, renderer, animId;
+  let followerArm, leaderArm;
+  let showLeader = true, showFollower = true;
+  let currentPositions = { follower: {}, leader: {} };
+
+  const COLORS = {
+    base:     0x334155,
+    link:     0x0ea5e9,
+    joint:    0x38bdf8,
+    gripper:  0x22d3ee,
+    leader:   0xa855f7,
+    leaderJoint: 0xc084fc,
+  };
+
+  function makeMaterial(color, opacity=1) {
+    return new THREE.MeshPhongMaterial({ color, opacity, transparent: opacity < 1 });
+  }
+
+  function makeCylinder(rTop, rBot, h, color, opacity=1) {
+    const g = new THREE.CylinderGeometry(rTop, rBot, h, 16);
+    return new THREE.Mesh(g, makeMaterial(color, opacity));
+  }
+  function makeBox(w, h, d, color, opacity=1) {
+    const g = new THREE.BoxGeometry(w, h, d);
+    return new THREE.Mesh(g, makeMaterial(color, opacity));
+  }
+  function makeSphere(r, color, opacity=1) {
+    const g = new THREE.SphereGeometry(r, 12, 12);
+    return new THREE.Mesh(g, makeMaterial(color, opacity));
+  }
+
+  function buildArm(isLeader) {
+    const lc = isLeader ? COLORS.leader : COLORS.link;
+    const jc = isLeader ? COLORS.leaderJoint : COLORS.joint;
+    const op = isLeader ? 0.55 : 1.0;
+
+    const root = new THREE.Group();
+
+    // Base
+    const base = makeCylinder(0.12, 0.15, 0.08, COLORS.base, op);
+    base.position.y = 0.04;
+    root.add(base);
+
+    // Shoulder pan pivot (rotates around Y)
+    const panPivot = new THREE.Group();
+    panPivot.position.y = 0.08;
+    root.add(panPivot);
+
+    const panJoint = makeSphere(0.06, jc, op);
+    panPivot.add(panJoint);
+
+    // Shoulder lift pivot (rotates around Z)
+    const liftPivot = new THREE.Group();
+    liftPivot.position.y = 0.02;
+    panPivot.add(liftPivot);
+
+    const upperArm = makeBox(0.05, 0.22, 0.05, lc, op);
+    upperArm.position.y = 0.11;
+    liftPivot.add(upperArm);
+
+    const elbowJoint = makeSphere(0.055, jc, op);
+    elbowJoint.position.y = 0.22;
+    liftPivot.add(elbowJoint);
+
+    // Elbow flex pivot
+    const elbowPivot = new THREE.Group();
+    elbowPivot.position.y = 0.22;
+    liftPivot.add(elbowPivot);
+
+    const forearm = makeBox(0.045, 0.20, 0.045, lc, op);
+    forearm.position.y = 0.10;
+    elbowPivot.add(forearm);
+
+    const wristJoint = makeSphere(0.048, jc, op);
+    wristJoint.position.y = 0.20;
+    elbowPivot.add(wristJoint);
+
+    // Wrist flex pivot
+    const wristFlexPivot = new THREE.Group();
+    wristFlexPivot.position.y = 0.20;
+    elbowPivot.add(wristFlexPivot);
+
+    const wristSeg = makeBox(0.04, 0.10, 0.04, lc, op);
+    wristSeg.position.y = 0.05;
+    wristFlexPivot.add(wristSeg);
+
+    // Wrist roll pivot (rotates around Y = arm axis)
+    const wristRollPivot = new THREE.Group();
+    wristRollPivot.position.y = 0.10;
+    wristFlexPivot.add(wristRollPivot);
+
+    const wristDisc = makeCylinder(0.035, 0.035, 0.03, jc, op);
+    wristDisc.rotation.x = Math.PI / 2;
+    wristRollPivot.add(wristDisc);
+
+    // Gripper
+    const gripperBase = makeBox(0.04, 0.04, 0.04, lc, op);
+    gripperBase.position.y = 0.02;
+    wristRollPivot.add(gripperBase);
+
+    const fingerL = makeBox(0.012, 0.07, 0.012, COLORS.gripper, op);
+    fingerL.position.set(-0.02, 0.055, 0);
+    wristRollPivot.add(fingerL);
+
+    const fingerR = makeBox(0.012, 0.07, 0.012, COLORS.gripper, op);
+    fingerR.position.set(0.02, 0.055, 0);
+    wristRollPivot.add(fingerR);
+
+    return {
+      root, panPivot, liftPivot, elbowPivot,
+      wristFlexPivot, wristRollPivot, fingerL, fingerR
+    };
+  }
+
+  function updateArm(arm, positions, calSet) {
+    const p = positions;
+    const c = calSet;
+
+    if (p.shoulder_pan !== undefined && c.shoulder_pan) {
+      arm.panPivot.rotation.y = norm(p.shoulder_pan, c.shoulder_pan) * -Math.PI * 0.75;
+    }
+    if (p.shoulder_lift !== undefined && c.shoulder_lift) {
+      arm.liftPivot.rotation.z = norm(p.shoulder_lift, c.shoulder_lift) * Math.PI * 0.45;
+    }
+    if (p.elbow_flex !== undefined && c.elbow_flex) {
+      arm.elbowPivot.rotation.z = norm(p.elbow_flex, c.elbow_flex) * -Math.PI * 0.5;
+    }
+    if (p.wrist_flex !== undefined && c.wrist_flex) {
+      arm.wristFlexPivot.rotation.z = norm(p.wrist_flex, c.wrist_flex) * Math.PI * 0.45;
+    }
+    if (p.wrist_roll !== undefined && c.wrist_roll) {
+      arm.wristRollPivot.rotation.y = norm(p.wrist_roll, c.wrist_roll) * Math.PI;
+    }
+    if (p.gripper !== undefined && c.gripper) {
+      const g = (norm(p.gripper, c.gripper) + 1) / 2; // 0=closed, 1=open
+      arm.fingerL.position.x = -0.012 - g * 0.022;
+      arm.fingerR.position.x =  0.012 + g * 0.022;
+    }
+  }
+
+  function initScene() {
+    const canvas = document.getElementById("model-canvas");
+    if (!canvas || !window.THREE) return;
+
+    const W = canvas.clientWidth, H = canvas.clientHeight;
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x0d0d0d);
+
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(45, W / H, 0.01, 100);
+    camera.position.set(0.7, 0.6, 0.9);
+    camera.lookAt(0, 0.3, 0);
+
+    // Lights
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(1, 2, 1.5);
+    scene.add(dir);
+    const fill = new THREE.DirectionalLight(0x4488ff, 0.3);
+    fill.position.set(-1, 0, -1);
+    scene.add(fill);
+
+    // Grid
+    const grid = new THREE.GridHelper(2, 20, 0x1a2a3a, 0x1a2a3a);
+    scene.add(grid);
+
+    // Build arms
+    followerArm = buildArm(false);
+    followerArm.root.position.x = 0;
+    scene.add(followerArm.root);
+
+    leaderArm = buildArm(true);
+    leaderArm.root.position.x = 0.4;
+    leaderArm.root.position.z = -0.1;
+    scene.add(leaderArm.root);
+
+    // Orbit controls (manual)
+    let dragging = false, lastX = 0, lastY = 0;
+    let theta = 0.8, phi = 0.6, radius = 1.4;
+    function updateCamera() {
+      camera.position.set(
+        radius * Math.sin(theta) * Math.cos(phi),
+        radius * Math.sin(phi) + 0.2,
+        radius * Math.cos(theta) * Math.cos(phi)
+      );
+      camera.lookAt(0.2, 0.3, 0);
+    }
+    canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+    canvas.addEventListener("mouseup",   () => { dragging = false; });
+    canvas.addEventListener("mousemove", e => {
+      if (!dragging) return;
+      theta -= (e.clientX - lastX) * 0.01;
+      phi    = Math.max(0.05, Math.min(1.4, phi + (e.clientY - lastY) * 0.01));
+      lastX = e.clientX; lastY = e.clientY;
+      updateCamera();
+    });
+    canvas.addEventListener("wheel", e => {
+      radius = Math.max(0.5, Math.min(3, radius + e.deltaY * 0.002));
+      updateCamera();
+      e.preventDefault();
+    }, { passive: false });
+    updateCamera();
+
+    // Handle resize
+    new ResizeObserver(() => {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }).observe(canvas);
+
+    function animate() {
+      animId = requestAnimationFrame(animate);
+      updateArm(followerArm, currentPositions.follower, CAL.follower);
+      updateArm(leaderArm,   currentPositions.leader,   CAL.leader);
+      followerArm.root.visible = showFollower;
+      leaderArm.root.visible   = showLeader;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    document.getElementById("model-status").textContent = "drag to orbit · scroll to zoom";
+  }
+
+  // Expose update function — called from SSE handler
+  window.modelUpdate = function(motors) {
+    if (!motors) return;
+    ["follower", "leader"].forEach(role => {
+      if (!motors[role]) return;
+      Object.entries(motors[role]).forEach(([name, v]) => {
+        currentPositions[role][name] = v.position;
+      });
+    });
+  };
+
+  window.modelSetShowLeader   = v => { showLeader = v; };
+  window.modelSetShowFollower = v => { showFollower = v; };
+
+  // Init when tab is first shown
+  const origSwitch = window.switchTab;
+  window.switchTab = function(name) {
+    origSwitch(name);
+    if (name === "model" && !renderer) setTimeout(initScene, 50);
+  };
+})();
+</script>
+
 </body>
 </html>

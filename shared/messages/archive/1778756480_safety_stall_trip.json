@@ -1,0 +1,14 @@
+{
+  "id": "1778756480_safety_stall_trip",
+  "from": "robot",
+  "to": "kb",
+  "type": "safety_stall_trip",
+  "ts": 1778756480.4879308,
+  "payload": {
+    "port": "/dev/tty.usbmodem5B141123331",
+    "motor": 3,
+    "name": "elbow_flex",
+    "load": 1000,
+    "count": 6
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "1778754625_calibration_started",
+  "from": "robot",
+  "to": "kb",
+  "type": "calibration_started",
+  "ts": 1778754625.275813,
+  "payload": {}
+}
