@@ -120,6 +120,58 @@ Chronological account of sessions, structured as episodes. Each episode:
 
 ---
 
+## Paper vision (session 7)
+
+### Core thesis
+The development process itself is a human-robot interaction problem, and LLM agents
+are a new kind of participant in it. Not code generation (Code as Policies), not
+high-level task planning (SayCan), not chatbot Q&A. The claim is that the entire
+messy, iterative, under-documented process of getting a robot working — debugging
+serial buses, writing calibration scripts, discovering register maps, leaving notes
+for the next session — can be done collaboratively with an LLM that has tool access
+and persistent memory.
+
+### Why SO-101
+Cheap, open-source, huge community (16k+ datasets on HF Hub). Thousands of people
+going through the same bringup pain right now. If the paper shows an LLM agent
+meaningfully reduces that pain and produces reusable artifacts (knowledge base,
+scripts, MCP server), that's a real contribution.
+
+### Minimum viable paper endpoint
+Claude guides human through full calibration using MCP tools. Demonstrates the
+human-LLM handoff: Claude says "move the arm," human moves it, Claude saves data.
+
+### Ideal paper endpoint
+Full pipeline: bringup -> calibration -> teleoperation -> dataset recording (10-50
+episodes of pick-and-place). Entire path from unboxing to training data mediated
+by an LLM.
+
+### Where the paper lives or dies: Section 5 (Analysis)
+The system is a case study, not an engineering contribution. Reviewers evaluate the
+observations, not the code. Key deliverables:
+- **Division of labor table**: What Claude did vs. human, per session. Extract from
+  session_log.jsonl and mailbox.json.
+- **Knowledge accumulation curve**: Git diff of so101_knowledge_base.md across commits.
+  How much written by Claude vs. curated by human?
+- **Failure taxonomy**: wrist_roll crash, serial port contention, protocol version
+  mismatch, sandbox blocking hardware access, context loss across sessions.
+- **Emergent protocols**: "nudge and confirm," read-before-write, small-step movement,
+  the mailbox system evolving from ad-hoc to structured.
+
+### What the human must do (not delegatable to Claude)
+- [ ] Photographs of physical setup at key stages
+- [ ] Screen recording of one MCP interaction (Claude moves gripper via tool call)
+- [ ] Subjective notes: what felt different about this vs. solo bringup
+- [ ] Physical actions during calibration and teleoperation
+
+### What Claude workers can draft
+- [ ] Section 4 narrative from session_log.jsonl + mailbox.json
+- [ ] Related work section (SayCan, Code as Policies, MemGPT, Inner Monologue, SWE-bench)
+- [ ] Architecture diagram description
+- [ ] Analysis tables from git history and session data
+
+---
+
 ## Data to collect going forward
 
 To strengthen the paper, capture these during future sessions:
