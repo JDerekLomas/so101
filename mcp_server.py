@@ -320,26 +320,71 @@ def assign_arm(port: str, role: str) -> dict:
 
 @mcp.tool()
 def start_calibration() -> dict:
-    """Start recording calibration ranges. Move each joint through its full range of motion while recording is active."""
-    return _post("/api/cal/start")
+    """Reset calibration ranges and start fresh. Calibration tracking is always on —
+    this just clears accumulated ranges so you can do a clean sweep.
+    Move each joint through its full range of motion, then call save_calibration."""
+    result = _post("/api/cal/start")
+    # Verify by reading state
+    state = _get("/api/state")
+    if isinstance(state, dict) and "motors" in state:
+        motor_count = sum(len(m) for m in state["motors"].values() if isinstance(m, dict))
+        result["motors_online"] = motor_count
+    return result
 
 
 @mcp.tool()
 def stop_calibration() -> dict:
-    """Stop recording calibration ranges (without saving)."""
-    return _post("/api/cal/stop")
+    """No-op — calibration tracking is always on. Use reset_calibration to clear ranges."""
+    return {"ok": True, "note": "Calibration tracking is always on. Use save_calibration to save or reset_calibration to clear."}
 
 
 @mcp.tool()
 def save_calibration() -> dict:
-    """Stop recording and save calibration ranges to the JSON files. Returns warnings if any joint wasn't moved enough."""
-    return _post("/api/cal/save")
+    """Save current calibration ranges to JSON files. Works any time — calibration
+    tracking is always on so ranges accumulate continuously. Returns warnings
+    if any joint had less than 50 ticks of movement recorded."""
+    # Check ranges before saving to give useful feedback
+    state = _get("/api/state")
+    cal_info = {}
+    if isinstance(state, dict):
+        cal_info["teleop_was_active"] = state.get("teleop_active", False)
+
+    result = _post("/api/cal/save")
+    if isinstance(result, dict) and "error" in result:
+        result["hint"] = "No range data accumulated yet. Move joints around, then try again."
+    return result
 
 
 @mcp.tool()
 def reset_calibration() -> dict:
-    """Reset recorded calibration ranges (start fresh)."""
+    """Reset recorded calibration ranges (start fresh). Does not affect saved files."""
     return _post("/api/cal/reset")
+
+
+@mcp.tool()
+def check_calibration() -> dict:
+    """Check if calibration data is valid (ranges wide enough for safe operation).
+
+    Returns status per arm: 'ok', 'warning' (narrow ranges), 'invalid' (wiped/missing),
+    or 'error'. Use this before any move or teleop to catch wiped calibration."""
+    return _get("/api/cal/check")
+
+
+@mcp.tool()
+def list_calibration_history() -> dict:
+    """List saved calibration backups. Every save creates a timestamped backup.
+    Use restore_calibration to recover from a wipe."""
+    return _get("/api/cal/history")
+
+
+@mcp.tool()
+def restore_calibration(filename: str) -> dict:
+    """Restore a calibration from a history backup.
+
+    Args:
+        filename: Name from list_calibration_history, e.g. 'follower_20260514_133000_known_good.json'
+    """
+    return _post("/api/cal/restore", {"filename": filename})
 
 
 @mcp.tool()

@@ -60,6 +60,8 @@ CAL_PATHS = {
     "follower": Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
     "leader":   Path.home() / ".cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
 }
+CAL_HISTORY_DIR = Path.home() / "so101/shared/calibration_history"
+CAL_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 ID_NAMES = {
     1: "shoulder_pan",
@@ -75,8 +77,7 @@ boards          = {}   # port -> {ph, handler, ids, positions, temps, loads, err
 assignment      = {}   # "leader"/"follower" -> port
 move_grace      = {}   # motor_id -> timestamp — suppress stall detection until this time
 MOVE_GRACE_S    = 2.0  # seconds to suppress stall detection after a commanded move
-cal_active      = False
-cal_ranges      = {}   # role -> {motor_id -> {min, max}}
+cal_ranges      = {}   # role -> {motor_id -> {min, max}}  — always-on tracking
 event_log       = []   # recent events, capped at 50
 notifications   = []   # messages shown in UI, capped at 20
 empty_ports     = set()  # USB ports that are connected but have no motors (don't re-probe every 3s)
@@ -467,6 +468,25 @@ def _restore_labels():
             boards[port]["label"] = role
 
 
+def _auto_assign_by_pgain():
+    """Auto-detect leader/follower by P gain register (29): follower=16, leader=0.
+    Call OUTSIDE state_lock (does serial I/O and push_event)."""
+    P_GAIN_ADDR = 29
+    with state_lock:
+        unlabeled = [(p, b["ph"], b["handler"], b["ids"][0])
+                     for p, b in boards.items()
+                     if b.get("label") is None and b["ids"]]
+    for port, ph, handler, mid in unlabeled:
+        p_gain = read_register(ph, handler, mid, P_GAIN_ADDR, 1)
+        if p_gain is not None:
+            role = "follower" if p_gain > 0 else "leader"
+            with state_lock:
+                if role not in assignment:
+                    boards[port]["label"] = role
+                    assignment[role] = port
+            push_event("auto_assigned", {"port": port, "role": role, "p_gain": p_gain})
+
+
 def _auto_scan():
     """Detect new/disappeared boards without blocking poll_loop for long."""
     current_paths = set(glob.glob("/dev/tty.usbmodem*"))
@@ -516,6 +536,7 @@ def _auto_scan():
                 }
             with state_lock:
                 _restore_labels()
+            _auto_assign_by_pgain()
             push_event("connected", {"port": path, "motor_count": len(ids)})
         else:
             ph.closePort()
@@ -549,7 +570,7 @@ def _write_shared_state():
                             }
             events_copy = list(event_log[-10:])
             cal_copy = {
-                "recording": cal_active,
+                "recording": True,  # always-on calibration tracking
                 "follower_file": str(CAL_PATHS["follower"]),
                 "leader_file":   str(CAL_PATHS["leader"]),
                 "last_saved": None,
@@ -619,6 +640,7 @@ def _handle_message(msg):
                     pass
             boards = scan_boards()
             _restore_labels()
+        _auto_assign_by_pgain()
         push_event("scan_complete", {"board_count": len(boards)})
 
     elif msg_type == "calibrate_start":
@@ -735,6 +757,7 @@ def api_rescan():
                 pass
         boards = scan_boards()
         _restore_labels()
+    _auto_assign_by_pgain()
     push_event("scan_complete", {"board_count": len(boards)})
     return jsonify({"ok": True, "count": len(boards)})
 
@@ -818,6 +841,7 @@ def api_notify_action():
                 except Exception: pass
             boards = scan_boards()
             _restore_labels()
+        _auto_assign_by_pgain()
         push_event("scan_complete", {"board_count": len(boards)})
 
     # Write response to from_user/ for Claude to read
@@ -899,13 +923,20 @@ def api_cal_save():
     skipped = []
     warnings = []
 
+    ts = time.strftime("%Y%m%d_%H%M%S")
     for role, motors in ranges_copy.items():
         cal_path = CAL_PATHS.get(role)
         if not cal_path or not cal_path.exists():
             skipped.append(f"{role}: no calibration file at {cal_path}")
             continue
+
+        # Back up current calibration before overwriting
         with open(cal_path) as f:
             cal = json.load(f)
+        backup_path = CAL_HISTORY_DIR / f"{role}_{ts}.json"
+        with open(backup_path, "w") as f:
+            json.dump({"_backup_of": str(cal_path), "_timestamp": ts, **cal}, f, indent=4)
+
         for mid, name in ID_NAMES.items():
             if name not in cal or mid not in motors:
                 continue
@@ -917,10 +948,103 @@ def api_cal_save():
             cal[name]["range_max"] = r["max"]
         with open(cal_path, "w") as f:
             json.dump(cal, f, indent=4)
+
+        # Also save the new calibration to history
+        new_path = CAL_HISTORY_DIR / f"{role}_{ts}_new.json"
+        with open(new_path, "w") as f:
+            json.dump({"_saved_at": ts, **cal}, f, indent=4)
+
         saved.append(str(cal_path))
 
     push_event("calibration_saved", {"saved": saved, "warnings": warnings})
     return jsonify({"ok": True, "saved": saved, "skipped": skipped, "warnings": warnings})
+
+
+@app.route("/api/cal/history", methods=["GET"])
+def api_cal_history():
+    """List all calibration backups."""
+    files = sorted(CAL_HISTORY_DIR.glob("*.json"), reverse=True)
+    history = []
+    for f in files[:50]:  # cap at 50
+        try:
+            data = json.loads(f.read_text())
+            history.append({
+                "filename": f.name,
+                "timestamp": data.get("_timestamp") or data.get("_saved_at", ""),
+                "role": f.name.split("_")[0],
+                "is_backup": "_new" not in f.name,
+            })
+        except Exception:
+            pass
+    return jsonify(history)
+
+
+@app.route("/api/cal/restore", methods=["POST"])
+def api_cal_restore():
+    """Restore a calibration from history.
+
+    Body: {"filename": "follower_20260514_134500.json"}
+    """
+    data = request.get_json(force=True) or {}
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "filename required"}), 400
+
+    src = CAL_HISTORY_DIR / filename
+    if not src.exists():
+        return jsonify({"error": f"file not found: {filename}"}), 404
+
+    hist = json.loads(src.read_text())
+    role = filename.split("_")[0]
+    cal_path = CAL_PATHS.get(role)
+    if not cal_path:
+        return jsonify({"error": f"unknown role in filename: {role}"}), 400
+
+    # Back up current before restoring
+    if cal_path.exists():
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        backup = CAL_HISTORY_DIR / f"{role}_{ts}_prerestore.json"
+        current = json.loads(cal_path.read_text())
+        with open(backup, "w") as f:
+            json.dump({"_backup_of": str(cal_path), "_timestamp": ts, "_reason": "pre-restore", **current}, f, indent=4)
+
+    # Strip metadata keys and write
+    cal_data = {k: v for k, v in hist.items() if not k.startswith("_")}
+    with open(cal_path, "w") as f:
+        json.dump(cal_data, f, indent=4)
+
+    push_event("calibration_restored", {"role": role, "from": filename})
+    return jsonify({"ok": True, "restored": str(cal_path), "from": filename})
+
+
+@app.route("/api/cal/check", methods=["GET"])
+def api_cal_check():
+    """Check if calibration data looks valid (ranges wide enough for safe operation)."""
+    results = {}
+    for role, cal_path in CAL_PATHS.items():
+        if not cal_path.exists():
+            results[role] = {"status": "missing", "path": str(cal_path)}
+            continue
+        try:
+            cal = json.loads(cal_path.read_text())
+            issues = []
+            for name, info in cal.items():
+                rmin = info.get("range_min", 0)
+                rmax = info.get("range_max", 0)
+                spread = rmax - rmin
+                if spread < 50:
+                    issues.append(f"{name}: spread={spread} (need >50, got min={rmin} max={rmax})")
+                elif spread < 500:
+                    issues.append(f"{name}: spread={spread} (narrow, may need re-sweep)")
+            results[role] = {
+                "status": "invalid" if any("need >50" in i for i in issues) else "ok" if not issues else "warning",
+                "issues": issues,
+                "joints": {name: {"min": info["range_min"], "max": info["range_max"], "spread": info["range_max"] - info["range_min"]}
+                           for name, info in cal.items() if "range_min" in info},
+            }
+        except Exception as e:
+            results[role] = {"status": "error", "error": str(e)}
+    return jsonify(results)
 
 
 # ------------------------------------------------------------------ #
@@ -1172,6 +1296,10 @@ if __name__ == "__main__":
     if boards:
         for path, board in boards.items():
             print(f"  {path}: {len(board['ids'])} motors ({board['ids']})")
+        _auto_assign_by_pgain()
+        for role in ("leader", "follower"):
+            if role in assignment:
+                print(f"  Auto-assigned {role} -> {assignment[role][-8:]}")
     else:
         print("  No boards found — will auto-detect when connected.")
 
