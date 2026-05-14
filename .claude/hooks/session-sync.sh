@@ -32,5 +32,9 @@ echo "3. Check teleop_active status before issuing any move commands."
 echo ""
 echo "Knowledge base: ~/so101/so101_knowledge_base.md"
 echo "Paper outline: ~/so101/paper/outline.md"
+echo ""
+
+# Auto-index conversation history (runs in background, doesn't block startup)
+python3 "$DIR/scripts/index_conversations.py" > /dev/null 2>&1 &
 
 exit 0

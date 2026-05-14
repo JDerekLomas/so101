@@ -405,5 +405,128 @@ def notify_user(title: str, body: str, type: str = "info") -> dict:
     return _post("/api/notify", {"title": title, "body": body, "type": type})
 
 
+@mcp.tool()
+def selftest(label: str = "follower") -> dict:
+    """Run a physical self-test on an arm: probe each joint with small movements
+    to verify motor responsiveness and calibration validity.
+
+    For each joint: reads position, nudges +-60 counts, checks it moved and returned.
+    Reports pass/fail per joint plus calibration status. Takes ~10 seconds per arm.
+    Teleop must be stopped first.
+
+    Args:
+        label: Which arm — "follower" or "leader"
+    """
+    # P2: pre-flight
+    err, state = _preflight(label)
+    if err:
+        return err
+
+    return _post("/api/selftest", {"label": label})
+
+
+@mcp.tool()
+def search_conversations(query: str, max_results: int = 10) -> dict:
+    """Search through conversation history (all Claude Code sessions with the user).
+
+    Useful for finding past prompts, decisions, debugging sessions, and learnings.
+    Searches the indexed transcripts first (run scripts/index_conversations.py to
+    rebuild the index). Falls back to searching raw Claude Code transcripts.
+
+    Args:
+        query: Search term or phrase to look for
+        max_results: Maximum number of matching excerpts to return (default 10)
+    """
+    import re
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+    # Try indexed data first
+    index_file = Path(__file__).parent / "shared" / "conversation_history" / "index.jsonl"
+    if index_file.exists():
+        results = []
+        for line_num, line in enumerate(index_file.read_text().splitlines(), 1):
+            try:
+                entry = json.loads(line)
+                text = entry.get("text", "")
+                if pattern.search(text):
+                    results.append({
+                        "session": entry.get("session_id", ""),
+                        "line": line_num,
+                        "role": entry.get("role", "?"),
+                        "timestamp": entry.get("ts", ""),
+                        "excerpt": text[:500],
+                    })
+                    if len(results) >= max_results:
+                        break
+            except Exception:
+                continue
+        return {"query": query, "source": "index", "matches": len(results), "results": results}
+
+    # Fallback: search raw transcripts
+    transcript_dir = Path.home() / ".claude/projects/-Users-dereklomas-so101"
+    if not transcript_dir.exists():
+        return {"error": "No conversation history found. Run scripts/index_conversations.py first."}
+
+    results = []
+    for f in sorted(transcript_dir.glob("*.jsonl")):
+        try:
+            for line in f.read_text().splitlines():
+                record = json.loads(line)
+                if record.get("type") not in ("user", "assistant"):
+                    continue
+                msg = record.get("message", {})
+                content = msg.get("content", "")
+                # Extract text from content blocks
+                if isinstance(content, list):
+                    text = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    continue
+                if pattern.search(text):
+                    results.append({
+                        "session": f.stem[:8],
+                        "role": msg.get("role", "?"),
+                        "timestamp": record.get("timestamp", ""),
+                        "excerpt": text[:500],
+                    })
+                    if len(results) >= max_results:
+                        break
+        except Exception:
+            continue
+        if len(results) >= max_results:
+            break
+
+    return {"query": query, "source": "raw_transcripts", "matches": len(results), "results": results,
+            "note": "Run scripts/index_conversations.py to build a faster index."}
+
+
+@mcp.tool()
+def list_conversations() -> dict:
+    """List all recorded conversation history files with summary info."""
+    history_dir = Path(__file__).parent / "shared" / "conversation_history"
+    if not history_dir.exists():
+        return {"conversations": [], "note": "No conversation history recorded yet."}
+
+    files = []
+    for f in sorted(history_dir.glob("*.jsonl")):
+        try:
+            lines = f.read_text().splitlines()
+            first = json.loads(lines[0]) if lines else {}
+            last = json.loads(lines[-1]) if lines else {}
+            user_msgs = sum(1 for l in lines if '"role": "user"' in l)
+            files.append({
+                "file": f.name,
+                "entries": len(lines),
+                "user_messages": user_msgs,
+                "first_ts": first.get("ts", ""),
+                "last_ts": last.get("ts", ""),
+            })
+        except Exception:
+            files.append({"file": f.name, "error": "could not parse"})
+
+    return {"conversations": files, "total": len(files)}
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

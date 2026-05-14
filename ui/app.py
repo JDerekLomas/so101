@@ -45,7 +45,7 @@ STATE_WRITE_INTERVAL = 0.5   # write shared state at 2 Hz
 AUTO_SCAN_INTERVAL   = 3.0   # check for new/gone boards every 3s
 
 # ── Safety thresholds (from shared/safety.json) ───────────────────
-SAFETY_FILE = Path(__file__).parent / "shared" / "safety.json"
+SAFETY_FILE = Path(__file__).parent.parent / "shared" / "safety.json"
 try:
     _safety = json.loads(SAFETY_FILE.read_text())
     TEMP_CUTOFF_C        = _safety["thresholds"]["temp_cutoff_c"]
@@ -403,6 +403,7 @@ def poll_loop():
                             # Phase 1: ramp toward snapshot of leader position at start
                             target = teleop_eq_targets.get(mid)
                             if target is None:
+                                all_equalized = False  # don't transition if any motor has no target
                                 continue
                             prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
                             delta = target - prev
@@ -438,11 +439,17 @@ def poll_loop():
                                 leader_vel = vel_raw & 0x3FF
                         speed = int(max(TELEOP_SPEED_MIN, min(TELEOP_SPEED_MAX,
                                         TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
-                        write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
-                        write_register(ph, handler, mid, GOAL_POSITION_ADDR, target, length=2)
+                        spd_ok = write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
+                        pos_ok = write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(target), length=2)
+                        if not spd_ok or not pos_ok:
+                            pending_events.append(("teleop_write_fail", {
+                                "motor": mid, "name": ID_NAMES.get(mid, str(mid)),
+                                "spd_ok": spd_ok, "pos_ok": pos_ok, "target": int(target),
+                            }))
 
                     # Transition out of equalization once all motors are close
-                    if teleop_equalizing and all_equalized:
+                    # Guard: require at least one motor to have processed equalization
+                    if teleop_equalizing and all_equalized and teleop_eq_targets:
                         teleop_equalizing = False
                         pending_events.append(("teleop_tracking", {}))
 
@@ -1048,6 +1055,156 @@ def api_cal_check():
 
 
 # ------------------------------------------------------------------ #
+# Routes — self-test                                                   #
+# ------------------------------------------------------------------ #
+
+@app.route("/api/selftest", methods=["POST"])
+def api_selftest():
+    """Physical self-test: probe each joint with small movements to verify
+    motor responsiveness and calibration validity.
+
+    For each joint on the requested arm:
+      1. Read current position
+      2. Check position is within calibrated range
+      3. Nudge +60 counts, wait, read position (did it move?)
+      4. Nudge back -60 counts, wait, read position (did it return?)
+      5. Report pass/fail per joint
+
+    Body: {"label": "follower"}  (default: follower)
+    """
+    data = request.get_json(force=True) or {}
+    label = data.get("label", "follower")
+
+    # Check teleop
+    if teleop_active:
+        return jsonify({"error": "Stop teleop before running self-test"}), 409
+
+    # Find board
+    with state_lock:
+        target_port = assignment.get(label)
+        board = boards.get(target_port) if target_port else None
+    if board is None:
+        return jsonify({"error": f"No board for '{label}'. Assign arm first."}), 404
+
+    # Load calibration
+    cal_path = CAL_PATHS.get(label)
+    cal = {}
+    if cal_path and cal_path.exists():
+        try:
+            cal = json.loads(cal_path.read_text())
+        except Exception:
+            pass
+
+    PROBE_DELTA = 60   # counts to nudge
+    SETTLE_TIME = 0.8  # seconds to wait for motor to settle
+    MOVE_THRESH = 15   # must move at least this many counts to pass
+
+    results = {}
+
+    for mid, name in ID_NAMES.items():
+        if mid not in board["ids"]:
+            results[name] = {"status": "skipped", "reason": "motor not found on bus"}
+            continue
+
+        joint_cal = cal.get(name, {})
+        cal_min = joint_cal.get("range_min")
+        cal_max = joint_cal.get("range_max")
+
+        # 1. Read current position
+        with state_lock:
+            pos_start = board["positions"].get(mid)
+        if pos_start is None:
+            results[name] = {"status": "fail", "reason": "cannot read position"}
+            continue
+
+        # 2. Check calibration range
+        cal_status = "ok"
+        if cal_min is not None and cal_max is not None:
+            spread = cal_max - cal_min
+            if spread < 50:
+                cal_status = "wiped"
+            elif pos_start < cal_min or pos_start > cal_max:
+                cal_status = "out_of_range"
+        else:
+            cal_status = "missing"
+
+        # 3. Determine nudge direction (stay inside range)
+        if cal_max is not None and pos_start + PROBE_DELTA > cal_max:
+            nudge = -PROBE_DELTA
+        else:
+            nudge = PROBE_DELTA
+
+        # 4. Nudge forward
+        target_fwd = max(0, min(4095, pos_start + nudge))
+        move_grace[mid] = time.time() + SETTLE_TIME + 0.5  # suppress stall detection
+        with state_lock:
+            ph, handler = board["ph"], board["handler"]
+            board["safety_disabled"][mid] = False
+            board["stall_counts"][mid] = 0
+            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+            write_register(ph, handler, mid, GOAL_POSITION_ADDR, target_fwd, length=2)
+
+        time.sleep(SETTLE_TIME)
+
+        with state_lock:
+            pos_after_fwd = board["positions"].get(mid, pos_start)
+
+        fwd_moved = abs(pos_after_fwd - pos_start)
+
+        # 5. Nudge back to original
+        move_grace[mid] = time.time() + SETTLE_TIME + 0.5
+        with state_lock:
+            write_register(ph, handler, mid, GOAL_POSITION_ADDR, pos_start, length=2)
+
+        time.sleep(SETTLE_TIME)
+
+        with state_lock:
+            pos_after_back = board["positions"].get(mid, pos_start)
+            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+
+        back_returned = abs(pos_after_back - pos_start)
+
+        # 6. Determine result
+        motor_ok = fwd_moved >= MOVE_THRESH
+        returned_ok = back_returned < MOVE_THRESH
+
+        if motor_ok and returned_ok:
+            status = "pass"
+        elif not motor_ok:
+            status = "fail"
+            reason = f"motor did not move (delta={fwd_moved}, need >={MOVE_THRESH})"
+        else:
+            status = "warning"
+            reason = f"moved but didn't return (off by {back_returned})"
+
+        result = {
+            "status": status,
+            "pos_start": pos_start,
+            "pos_after_nudge": pos_after_fwd,
+            "pos_after_return": pos_after_back,
+            "nudge_delta": fwd_moved,
+            "return_error": back_returned,
+            "calibration": cal_status,
+        }
+        if status != "pass":
+            result["reason"] = reason
+        results[name] = result
+
+    # Summary
+    passed = sum(1 for r in results.values() if r["status"] == "pass")
+    total = len(results)
+    push_event("selftest_complete", {"label": label, "passed": passed, "total": total})
+
+    return jsonify({
+        "label": label,
+        "passed": passed,
+        "total": total,
+        "all_pass": passed == total,
+        "joints": results,
+    })
+
+
+# ------------------------------------------------------------------ #
 # Routes — shared state                                               #
 # ------------------------------------------------------------------ #
 
@@ -1058,6 +1215,22 @@ def api_state():
         return jsonify(json.loads(STATE_FILE.read_text()))
     except Exception:
         return jsonify({"error": "state file not yet written"}), 503
+
+
+@app.route("/api/positions")
+def api_positions():
+    """Fast endpoint: current positions for both arms, plus teleop state.
+    Used by the recorder at 30Hz — reads from memory, not disk."""
+    with state_lock:
+        result = {"teleop": teleop_active, "ts": time.time()}
+        for port, board in boards.items():
+            label = board.get("label")
+            if label in ("follower", "leader"):
+                result[label] = {}
+                for mid, name in ID_NAMES.items():
+                    if mid in board["positions"]:
+                        result[label][name] = board["positions"][mid]
+    return jsonify(result)
 
 
 @app.route("/api/events")
@@ -1221,6 +1394,7 @@ def api_teleop_start():
         for mid in f_board["ids"]:
             f_board["safety_disabled"][mid] = False
             f_board["stall_counts"][mid]    = 0
+            write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
         # Seed ramp and wrap-detection from current follower positions
         teleop_positions = dict(f_board["positions"])
@@ -1229,9 +1403,7 @@ def api_teleop_start():
         # Snapshot leader positions mapped to follower — equalization target
         lc_map = cal.get("leader", {})
         fc_map = cal.get("follower", {})
-        eq_targets  = {}
-        large_gaps  = {}  # {mid: gap} — joints too far to equalize automatically
-        EQ_MAX_GAP  = 600  # counts — above this, joint is skipped during equalization
+        eq_targets = {}
         for mid in f_board["ids"]:
             name = ID_NAMES.get(mid)
             if not name:
@@ -1241,21 +1413,14 @@ def api_teleop_start():
             l_raw = l_board["positions"].get(mid)
             if lc and fc and l_raw is not None:
                 target = _map_position(l_raw, lc, fc)
-                f_now  = f_board["positions"].get(mid, target)
-                gap    = abs(f_now - target)
-                if gap > EQ_MAX_GAP:
-                    large_gaps[mid] = gap
-                    teleop_halted.add(mid)  # skip this joint — user must position manually
-                else:
-                    eq_targets[mid] = target
+                eq_targets[mid] = target
         teleop_eq_targets  = eq_targets
         teleop_equalizing  = True
         teleop_cal         = cal
         teleop_active      = True
-    skipped = {ID_NAMES.get(mid, mid): gap for mid, gap in large_gaps.items()}
-    push_event("teleop_started", {"phase": "equalizing", "skipped": skipped})
-    return jsonify({"ok": True, "phase": "equalizing", "skipped": skipped,
-                    "note": f"Joints with gap > {EQ_MAX_GAP} skipped (position manually): {list(skipped.keys())}" if skipped else "all joints equalizing"})
+    push_event("teleop_started", {"phase": "equalizing", "joints": len(eq_targets)})
+    return jsonify({"ok": True, "phase": "equalizing",
+                    "note": f"Equalizing {len(eq_targets)} joints"})
 
 
 @app.route("/api/teleop/stop", methods=["POST"])
