@@ -1,0 +1,63 @@
+{
+  "follower/elbow_flex_vs_shoulder_lift": {
+    "ts": "2026-05-14T14:54:45",
+    "samples": [
+      {
+        "sweep_pos": 682,
+        "probe_min": 43,
+        "probe_max": 115,
+        "probe_min_load": 52,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 999,
+        "probe_min": 117,
+        "probe_max": 127,
+        "probe_min_load": 52,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 1356,
+        "probe_min": 139,
+        "probe_max": 136,
+        "probe_min_load": 392,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 1709,
+        "probe_min": 143,
+        "probe_max": 137,
+        "probe_min_load": 404,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 2056,
+        "probe_min": 129,
+        "probe_max": 122,
+        "probe_min_load": 480,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 2411,
+        "probe_min": 66,
+        "probe_max": 14,
+        "probe_min_load": 1000,
+        "probe_max_load": 52
+      },
+      {
+        "sweep_pos": 2550,
+        "probe_min": 2,
+        "probe_max": 0,
+        "probe_min_load": 1000,
+        "probe_max_load": 200
+      },
+      {
+        "sweep_pos": 2550,
+        "probe_min": 0,
+        "probe_max": 0,
+        "probe_min_load": 200,
+        "probe_max_load": 200
+      }
+    ]
+  }
+}

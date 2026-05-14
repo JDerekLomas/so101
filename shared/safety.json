@@ -9,7 +9,8 @@
     "P5_detect_and_halt": "Monitor load, temperature, and encoder wraps continuously. Trip immediately on anomaly.",
     "P6_equalize_before_track": "Before starting teleop, move follower to match leader position at safe speed. Never start tracking from an unknown state.",
     "P7_human_in_the_loop": "Notify the user on any safety trip, unusual state, or before large moves (>500 counts from current position).",
-    "P8_collision_freeze": "If follower motor load exceeds collision threshold during teleop, freeze that joint at current position. Unfreeze only when load drops below retreat threshold. Never push through resistance."
+    "P8_collision_freeze": "If follower motor load exceeds collision threshold during teleop, freeze that joint at current position. Unfreeze only when load drops below retreat threshold. Never push through resistance.",
+    "P9_workspace_aware": "Use probed workspace limits (from auto-calibrate and workspace probe) to constrain motion beyond calibration. The robot learns its environment through force feedback and enforces those limits in all move paths."
   },
 
   "thresholds": {
@@ -39,5 +40,15 @@
   "lag": {
     "max_lag_counts": 200,
     "lag_warn_cycles": 15
+  },
+
+  "workspace": {
+    "_doc": "Workspace limits from cybernetic probing. These override calibration limits where more restrictive. Found by /api/workspace/probe — the robot probed its own joints against the physical environment.",
+    "follower": {
+      "elbow_flex": {
+        "hard_min": 200,
+        "note": "Desk surface at ~100-150 counts. Probed 2026-05-14. Flat limit regardless of shoulder_lift."
+      }
+    }
   }
 }

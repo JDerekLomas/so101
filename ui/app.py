@@ -17,7 +17,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 try:
-    from scservo_sdk import PacketHandler, PortHandler
+    from scservo_sdk import PacketHandler, PortHandler, GroupSyncWrite, SCS_LOBYTE, SCS_HIBYTE
     SDK_AVAILABLE = True
 except ImportError:
     SDK_AVAILABLE = False
@@ -66,6 +66,7 @@ CAL_PATHS = {
 }
 CAL_HISTORY_DIR = Path.home() / "so101/shared/calibration_history"
 CAL_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+CAL_RANGES_FILE = Path.home() / "so101/shared/cal_ranges_live.json"  # persistent always-on ranges
 
 ID_NAMES = {
     1: "shoulder_pan",
@@ -94,23 +95,72 @@ teleop_prev_pos    = {}     # {motor_id: last_read_follower_pos} — for wrap de
 teleop_halted      = set()  # motor IDs halted due to encoder wrap this session
 teleop_collision   = {}     # {motor_id: frozen_position} — joints frozen due to collision load
 teleop_slow_mode   = False  # True = conservative limits for initial exploration
+teleop_log         = []     # rolling buffer of teleop cycle snapshots
+TELEOP_LOG_MAX     = 200    # keep last N cycles (~10s at 20Hz)
+teleop_cycle_count = 0      # total cycles since teleop started
 
 TELEOP_WRAP_THRESH = 1500   # counts — position jump this large = encoder wrap, halt joint
+TELEOP_LARGE_GAP   = 600   # counts — skip equalization if follower too far from target
+CAL_LEARN_MARGIN   = 100   # counts — buffer beyond collision point when tightening limits
 
 # Max counts to move per poll cycle (20 Hz). 60 counts/step = 1200 counts/s ≈ 3.4 s full sweep.
-TELEOP_MAX_DELTA   = 60
+TELEOP_MAX_DELTA   = 150   # counts/cycle — 3000 counts/s at 20Hz, full sweep in ~1.2s
 TELEOP_EQ_THRESH   = 25    # counts — follower must be within this of target to end equalization
 
 # Proportional speed control for teleop (matches teleop_6joint.py)
 TELEOP_SPEED_K     = 1.2   # speed units per count of error
 TELEOP_SPEED_FF    = 0.6   # feedforward gain from leader velocity
 TELEOP_SPEED_MIN   = 80    # minimum speed (keeps motion smooth near target)
-TELEOP_SPEED_MAX   = 500   # maximum speed (prevents violent motion)
+TELEOP_SPEED_MAX   = 800   # maximum speed (tracks fast leader movements)
 
 # Slow-mode overrides — gentle exploration (half speed, quarter delta)
 TELEOP_SLOW_MAX_DELTA  = 15   # counts/cycle → ~300 counts/s = very slow sweep
 TELEOP_SLOW_SPEED_MIN  = 30
 TELEOP_SLOW_SPEED_MAX  = 100
+
+
+# ------------------------------------------------------------------ #
+# Persistent calibration range tracking                               #
+# ------------------------------------------------------------------ #
+
+def _load_persistent_cal_ranges():
+    """Load accumulated cal ranges from disk so they survive restarts."""
+    global cal_ranges
+    try:
+        if CAL_RANGES_FILE.exists():
+            data = json.loads(CAL_RANGES_FILE.read_text())
+            # Convert string motor IDs back to ints
+            for role, motors in data.get("ranges", {}).items():
+                cal_ranges[role] = {int(mid): v for mid, v in motors.items()}
+            print(f"  Loaded persistent cal ranges from {CAL_RANGES_FILE.name}")
+            for role, motors in cal_ranges.items():
+                for mid, r in motors.items():
+                    name = ID_NAMES.get(mid, str(mid))
+                    spread = r["max"] - r["min"]
+                    if spread > 50:
+                        print(f"    {role}/{name}: {r['min']}-{r['max']} ({spread} ticks)")
+    except Exception as e:
+        print(f"  Could not load persistent cal ranges: {e}")
+
+
+def _save_persistent_cal_ranges():
+    """Write accumulated cal ranges to disk. Called periodically from poll loop."""
+    try:
+        with state_lock:
+            snapshot = {role: {str(mid): dict(v) for mid, v in motors.items()}
+                        for role, motors in cal_ranges.items()}
+        if not snapshot:
+            return
+        data = {
+            "_updated": time.time(),
+            "_doc": "Always-on calibration range tracking. Accumulates across server restarts.",
+            "ranges": snapshot,
+        }
+        tmp = CAL_RANGES_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(CAL_RANGES_FILE)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ #
@@ -162,21 +212,27 @@ def ping_ids(ph, handler):
 
 def read_register(ph, handler, mid, addr, length=2, retries=3):
     for _ in range(retries):
-        if length == 1:
-            val, result, _ = handler.read1ByteTxRx(ph, mid, addr)
-        else:
-            val, result, _ = handler.read2ByteTxRx(ph, mid, addr)
-        if result == 0:
-            return val
+        try:
+            if length == 1:
+                val, result, _ = handler.read1ByteTxRx(ph, mid, addr)
+            else:
+                val, result, _ = handler.read2ByteTxRx(ph, mid, addr)
+            if result == 0:
+                return val
+        except Exception:
+            time.sleep(0.1)
     return None
 
 
 def write_register(ph, handler, mid, addr, value, length=2):
-    if length == 1:
-        result, _ = handler.write1ByteTxRx(ph, mid, addr, value)
-    else:
-        result, _ = handler.write2ByteTxRx(ph, mid, addr, value)
-    return result == 0
+    try:
+        if length == 1:
+            result, _ = handler.write1ByteTxRx(ph, mid, addr, value)
+        else:
+            result, _ = handler.write2ByteTxRx(ph, mid, addr, value)
+        return result == 0
+    except Exception:
+        return False
 
 
 def _load_teleop_cal():
@@ -190,15 +246,83 @@ def _load_teleop_cal():
     return result
 
 
+def _raw_to_calibrated(raw, cal):
+    """Convert raw encoder value to calibrated position using homing offset and drive mode.
+    This is how lerobot normalizes positions — the homing offset determines the zero point
+    and drive_mode can invert the direction."""
+    offset = cal.get("homing_offset", 0)
+    drive = cal.get("drive_mode", 0)
+    if drive == 0:
+        return raw - offset
+    else:
+        return offset - raw
+
+
+def _calibrated_to_raw(calibrated, cal):
+    """Inverse of _raw_to_calibrated."""
+    offset = cal.get("homing_offset", 0)
+    drive = cal.get("drive_mode", 0)
+    if drive == 0:
+        return calibrated + offset
+    else:
+        return offset - calibrated
+
+
 def _map_position(leader_raw, lc, fc):
-    """Linear map from leader cal range to follower cal range, clamped."""
-    l_min, l_max = lc["range_min"], lc["range_max"]
-    f_min, f_max = fc["range_min"], fc["range_max"]
-    if l_max <= l_min:
-        return (f_min + f_max) // 2
-    t = (leader_raw - l_min) / (l_max - l_min)
+    """Map leader raw position to follower raw position via calibrated space.
+
+    1. Convert leader raw → calibrated (applying homing offset + drive mode)
+    2. Normalize to [0, 1] within leader's calibrated range
+    3. Denormalize to follower's calibrated range
+    4. Convert follower calibrated → raw
+
+    This correctly handles joints where leader and follower homing offsets
+    have different signs (physically mirrored directions)."""
+    # Leader: raw → calibrated
+    l_cal = _raw_to_calibrated(leader_raw, lc)
+    l_min_cal = _raw_to_calibrated(lc["range_min"], lc)
+    l_max_cal = _raw_to_calibrated(lc["range_max"], lc)
+    # Ensure min < max in calibrated space
+    if l_min_cal > l_max_cal:
+        l_min_cal, l_max_cal = l_max_cal, l_min_cal
+
+    # Normalize to [0, 1]
+    l_span = l_max_cal - l_min_cal
+    if l_span < 1:
+        t = 0.5
+    else:
+        t = (l_cal - l_min_cal) / l_span
     t = max(0.0, min(1.0, t))
-    return round(f_min + t * (f_max - f_min))
+
+    # Follower: calibrated range
+    f_min_cal = _raw_to_calibrated(fc["range_min"], fc)
+    f_max_cal = _raw_to_calibrated(fc["range_max"], fc)
+    if f_min_cal > f_max_cal:
+        f_min_cal, f_max_cal = f_max_cal, f_min_cal
+
+    # Denormalize to follower calibrated space
+    f_cal = f_min_cal + t * (f_max_cal - f_min_cal)
+
+    # Follower: calibrated → raw
+    f_raw = _calibrated_to_raw(f_cal, fc)
+
+    # Clamp to raw range
+    f_raw_min = min(fc["range_min"], fc["range_max"])
+    f_raw_max = max(fc["range_min"], fc["range_max"])
+    return round(max(f_raw_min, min(f_raw_max, f_raw)))
+
+
+def _apply_workspace_limits(position, joint_name, label="follower"):
+    """Clamp position to workspace limits from safety.json (P9: environment-aware)."""
+    try:
+        ws = _safety.get("workspace", {}).get(label, {}).get(joint_name, {})
+        if "hard_min" in ws:
+            position = max(ws["hard_min"], position)
+        if "hard_max" in ws:
+            position = min(ws["hard_max"], position)
+    except Exception:
+        pass
+    return position
 
 
 def _load_cal_limits(role):
@@ -300,6 +424,84 @@ def scan_boards():
 
 
 # ------------------------------------------------------------------ #
+# Adaptive calibration learning                                       #
+# ------------------------------------------------------------------ #
+
+def _learn_collision_limit(joint_name, collision_pos):
+    """Update follower calibration range to exclude a collision position.
+
+    Called when the teleop collision detector freezes a joint (load > threshold).
+    Permanently tightens the calibration range so future sessions never command
+    the arm to that position again. Implements P5+: learn from obstacles.
+
+    collision_pos near range_min → raise range_min
+    collision_pos near range_max → lower range_max
+    """
+    global teleop_cal, teleop_eq_targets
+
+    cal_file = CAL_PATHS.get("follower")
+    if not cal_file or not cal_file.exists():
+        return
+    try:
+        cal = json.loads(cal_file.read_text())
+        if joint_name not in cal:
+            return
+        entry = cal[joint_name]
+        midpoint = (entry["range_min"] + entry["range_max"]) / 2
+
+        if collision_pos <= midpoint:
+            new_val = int(collision_pos + CAL_LEARN_MARGIN)
+            if new_val <= entry["range_min"]:
+                return  # already tighter, no change needed
+            old_val = entry["range_min"]
+            entry["range_min"] = new_val
+            boundary = "min"
+        else:
+            new_val = int(collision_pos - CAL_LEARN_MARGIN)
+            if new_val >= entry["range_max"]:
+                return
+            old_val = entry["range_max"]
+            entry["range_max"] = new_val
+            boundary = "max"
+
+        # Write calibration file
+        cal_file.write_text(json.dumps(cal, indent=2))
+
+        # Update shared calibration JSON too
+        shared_cal = Path.home() / "so101/shared/calibration.json"
+        try:
+            if shared_cal.exists():
+                sc = json.loads(shared_cal.read_text())
+                if "follower" in sc and joint_name in sc["follower"]:
+                    sc["follower"][joint_name]["range_min"] = entry["range_min"]
+                    sc["follower"][joint_name]["range_max"] = entry["range_max"]
+                    shared_cal.write_text(json.dumps(sc, indent=2))
+        except Exception:
+            pass
+
+        # Update in-memory teleop_cal so THIS session uses new limits immediately
+        with state_lock:
+            if "follower" in teleop_cal and joint_name in teleop_cal["follower"]:
+                teleop_cal["follower"][joint_name]["range_min"] = entry["range_min"]
+                teleop_cal["follower"][joint_name]["range_max"] = entry["range_max"]
+            # Clamp any existing equalization target for this joint inside new range
+            mid = next((k for k, v in ID_NAMES.items() if v == joint_name), None)
+            if mid is not None and mid in teleop_eq_targets:
+                clamped = max(entry["range_min"], min(entry["range_max"], teleop_eq_targets[mid]))
+                teleop_eq_targets[mid] = clamped
+
+        push_event("cal_limit_learned", {
+            "joint": joint_name,
+            "boundary": boundary,
+            "collision_pos": int(collision_pos),
+            "old": old_val,
+            "new": new_val,
+        })
+    except Exception:
+        pass  # never let learning failures break anything
+
+
+# ------------------------------------------------------------------ #
 # Background threads                                                  #
 # ------------------------------------------------------------------ #
 
@@ -366,6 +568,9 @@ def poll_loop():
                     pass
 
             # ── Teleop: mirror leader -> follower at 20 Hz ───────────
+            # Uses GroupSyncWrite (broadcast, no status packet expected) so writes
+            # never block on timeout. Individual write2ByteTxRx times out when
+            # return-level=1 (lerobot default), stalling the loop.
             if teleop_active:
                 l_port = assignment.get("leader")
                 f_port = assignment.get("follower")
@@ -377,6 +582,12 @@ def poll_loop():
                     ph      = f_board["ph"]
                     handler = f_board["handler"]
                     all_equalized = True
+                    max_delta = TELEOP_SLOW_MAX_DELTA if teleop_slow_mode else TELEOP_MAX_DELTA
+
+                    # Compute goal positions for all active joints this cycle
+                    goals = {}  # mid -> target position (int)
+                    skip_reasons = {}  # mid -> reason string (for debug)
+
                     for mid in f_board["ids"]:
                         name = ID_NAMES.get(mid, str(mid))
 
@@ -398,61 +609,59 @@ def poll_loop():
 
                         # Skip halted joints
                         if mid in teleop_halted:
+                            skip_reasons[mid] = "wrap_halted"
                             continue
 
-                        # Clear stall trips so motors stay active — but NEVER override temp cutoff
+                        # Clear stall trips — but NEVER override temperature cutoff
                         if f_board["safety_disabled"].get(mid):
                             if f_board["safety_cause"].get(mid) == "temp":
-                                continue  # motor is too hot — skip, don't re-enable
+                                skip_reasons[mid] = f"temp_cutoff(t={f_board['temps'].get(mid)})"
+                                continue  # too hot, skip
                             f_board["safety_disabled"][mid] = False
                             f_board["safety_cause"][mid]    = None
                             f_board["stall_counts"][mid]    = 0
                             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+
                         name = ID_NAMES.get(mid)
                         if not name:
+                            skip_reasons[mid] = "no_name"
                             continue
                         lc = lc_map.get(name)
                         fc = fc_map.get(name)
                         if lc is None or fc is None:
+                            skip_reasons[mid] = f"no_cal(lc={'Y' if lc else 'N'},fc={'Y' if fc else 'N'})"
                             continue
 
                         # ── Collision detection: freeze joint if load too high ──
+                        # Skip collision detection during equalization — the arm needs
+                        # to ramp through gravity-loaded positions to reach its target.
                         f_load = f_board["loads"].get(mid)
-                        if f_load is not None and f_load > COLLISION_LOAD_THRESHOLD:
+                        if not teleop_equalizing and f_load is not None and f_load > COLLISION_LOAD_THRESHOLD:
                             if mid not in teleop_collision:
-                                # Freeze: record current position, stop sending new goals
                                 frozen_pos = f_board["positions"].get(mid, teleop_positions.get(mid, 0))
                                 teleop_collision[mid] = frozen_pos
-                                # Command motor to hold where it is (not where leader wants)
-                                write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
-                                write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(frozen_pos), length=2)
                                 pending_events.append(("teleop_collision", {
                                     "motor": mid, "name": name, "load": f_load,
                                     "frozen_at": frozen_pos,
                                 }))
-                            continue  # skip normal tracking for this joint
+                            goals[mid] = int(teleop_collision[mid])
+                            continue
                         elif mid in teleop_collision:
-                            # Unfreeze: load dropped below retreat threshold
                             if f_load is not None and f_load < COLLISION_RETREAT_LOAD:
                                 del teleop_collision[mid]
                                 pending_events.append(("teleop_collision_cleared", {
                                     "motor": mid, "name": name, "load": f_load,
                                 }))
                             else:
-                                # Still in collision zone, keep frozen
-                                frozen_pos = teleop_collision[mid]
-                                write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(frozen_pos), length=2)
+                                goals[mid] = int(teleop_collision[mid])
                                 continue
 
                         if teleop_equalizing:
-                            # Phase 1: ramp toward snapshot of leader position at start
                             target = teleop_eq_targets.get(mid)
                             if target is None:
-                                all_equalized = False  # don't transition if any motor has no target
+                                all_equalized = False
                                 continue
                             prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
-                            # Apply slow-mode delta limit during equalization
-                            max_delta = TELEOP_SLOW_MAX_DELTA if teleop_slow_mode else TELEOP_MAX_DELTA
                             delta = target - prev
                             if abs(delta) > max_delta:
                                 target = prev + max_delta * (1 if delta > 0 else -1)
@@ -460,54 +669,103 @@ def poll_loop():
                             elif abs(target - f_board["positions"].get(mid, target)) > TELEOP_EQ_THRESH:
                                 all_equalized = False
                         else:
-                            # Phase 2: live tracking
                             l_raw = l_board["positions"].get(mid)
                             if l_raw is None:
                                 continue
                             target = _map_position(l_raw, lc, fc)
                             prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
-                            max_delta = TELEOP_SLOW_MAX_DELTA if teleop_slow_mode else TELEOP_MAX_DELTA
                             delta = target - prev
                             if abs(delta) > max_delta:
                                 target = prev + max_delta * (1 if delta > 0 else -1)
 
+                        # P9: workspace limits — clamp to environment boundaries
+                        target = _apply_workspace_limits(target, name, "follower")
                         teleop_positions[mid] = target
-                        # Proportional speed — slow mode uses tighter bounds
-                        spd_min = TELEOP_SLOW_SPEED_MIN if teleop_slow_mode else TELEOP_SPEED_MIN
-                        spd_max = TELEOP_SLOW_SPEED_MAX if teleop_slow_mode else TELEOP_SPEED_MAX
-                        current_pos = f_board["positions"].get(mid, target)
-                        error = abs(target - current_pos)
+                        goals[mid] = int(target)
+
+                    # ── Proportional speed per joint ─────────────────────────
+                    speeds = {}  # mid -> speed value
+                    cycle_details = {}  # mid -> {pos, target, error, speed, ...} for logging
+                    spd_min = TELEOP_SLOW_SPEED_MIN if teleop_slow_mode else TELEOP_SPEED_MIN
+                    spd_max = TELEOP_SLOW_SPEED_MAX if teleop_slow_mode else TELEOP_SPEED_MAX
+                    for mid, target_pos in goals.items():
+                        current_pos = f_board["positions"].get(mid, target_pos)
+                        error = abs(target_pos - current_pos)
                         leader_vel = 0
-                        if not teleop_equalizing and not teleop_slow_mode and mid in l_board["ids"]:
-                            l_ph, l_handler = l_board["ph"], l_board["handler"]
-                            vel_raw, l_res, l_err = l_handler.read2ByteTxRx(l_ph, mid, PRESENT_SPEED_ADDR)
-                            if l_res == 0 and l_err == 0:
-                                # STS3215 speed: bit 10 = direction, bits 0-9 = magnitude
-                                leader_vel = vel_raw & 0x3FF
+                        if not teleop_equalizing and not teleop_slow_mode and mid in l_board.get("ids", []):
+                            try:
+                                l_ph, l_handler = l_board["ph"], l_board["handler"]
+                                vel_raw, l_res, l_err = l_handler.read2ByteTxRx(l_ph, mid, PRESENT_SPEED_ADDR)
+                                if l_res == 0 and l_err == 0:
+                                    leader_vel = vel_raw & 0x3FF
+                            except Exception:
+                                pass
                         speed = int(max(spd_min, min(spd_max,
                                         TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
-                        spd_ok = write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
-                        pos_ok = write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(target), length=2)
-                        if not spd_ok or not pos_ok:
-                            pending_events.append(("teleop_write_fail", {
-                                "motor": mid, "name": ID_NAMES.get(mid, str(mid)),
-                                "spd_ok": spd_ok, "pos_ok": pos_ok, "target": int(target),
-                            }))
+                        speeds[mid] = speed
+                        name = ID_NAMES.get(mid, str(mid))
+                        cycle_details[name] = {
+                            "pos": current_pos, "target": target_pos,
+                            "error": int(error), "speed": speed, "lvel": leader_vel,
+                        }
+
+                    # ── Sync-write speeds in one broadcast packet ──
+                    if speeds and SDK_AVAILABLE:
+                        gsw_spd = GroupSyncWrite(ph, handler, SPEED_ADDR, 2)
+                        for mid, spd in speeds.items():
+                            gsw_spd.addParam(mid, [SCS_LOBYTE(spd), SCS_HIBYTE(spd)])
+                        gsw_spd.txPacket()
+                        gsw_spd.clearParam()
+
+                    # ── Sync-write all goal positions in one broadcast packet ──
+                    if goals and SDK_AVAILABLE:
+                        gsw = GroupSyncWrite(ph, handler, GOAL_POSITION_ADDR, 2)
+                        for mid, pos in goals.items():
+                            gsw.addParam(mid, [SCS_LOBYTE(pos), SCS_HIBYTE(pos)])
+                        gsw.txPacket()
+                        gsw.clearParam()
+
+                    # ── Teleop cycle logging ─────────────────────────────────
+                    teleop_cycle_count += 1
+                    phase = "eq" if teleop_equalizing else "track"
+                    log_entry = {"t": round(now, 3), "cycle": teleop_cycle_count,
+                                 "phase": phase, "goals": len(goals),
+                                 "skipped": {ID_NAMES.get(m, str(m)): r for m, r in skip_reasons.items()},
+                                 "joints": cycle_details}
+                    teleop_log.append(log_entry)
+                    if len(teleop_log) > TELEOP_LOG_MAX:
+                        teleop_log.pop(0)
+                    # Print summary every 20 cycles (~1s)
+                    if teleop_cycle_count % 20 == 1:
+                        parts = []
+                        for jname in ("shoulder_pan", "shoulder_lift", "elbow_flex",
+                                      "wrist_flex", "wrist_roll", "gripper"):
+                            d = cycle_details.get(jname)
+                            if d:
+                                parts.append(f"{jname[:4]}:e={d['error']:>4} s={d['speed']:>3}")
+                        skip_str = ""
+                        if skip_reasons:
+                            skip_str = " SKIP:" + ",".join(f"{ID_NAMES.get(m,'?')}={r}" for m, r in skip_reasons.items())
+                        print(f"[teleop:{phase}] c={teleop_cycle_count} goals={len(goals)} {' | '.join(parts)}{skip_str}")
 
                     # Transition out of equalization once all motors are close
-                    # Guard: require at least one motor to have processed equalization
                     if teleop_equalizing and all_equalized and teleop_eq_targets:
                         teleop_equalizing = False
                         pending_events.append(("teleop_tracking", {}))
+                        print(f"[teleop] Equalization complete after {teleop_cycle_count} cycles")
 
         # Push safety events outside state_lock (push_event acquires it)
         for kind, detail in pending_events:
             push_event(kind, detail)
+            # Adaptive learning: when a collision is confirmed, tighten cal limits
+            if kind == "teleop_collision" and "name" in detail:
+                _learn_collision_limit(detail["name"], detail["frozen_at"])
 
         # Write shared state file at 2 Hz
         if now - last_state_write >= STATE_WRITE_INTERVAL:
             last_state_write = now
             _write_shared_state()
+            _save_persistent_cal_ranges()
 
         # Process any incoming messages
         _process_messages()
@@ -745,7 +1003,7 @@ def stream():
                 events = list(event_log[-5:])
                 notifs = [n for n in notifications if not n.get("dismissed")]
                 empty  = list(empty_ports)
-            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking', 'teleop_halted': list(teleop_halted), 'teleop_collision': {ID_NAMES.get(k, str(k)): v for k, v in teleop_collision.items()}})}\n\n"
+            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking', 'teleop_slow': teleop_slow_mode, 'teleop_halted': list(teleop_halted), 'teleop_collision': {ID_NAMES.get(k, str(k)): v for k, v in teleop_collision.items()}})}\n\n"
             time.sleep(0.1)
 
     return Response(generate(), mimetype="text/event-stream",
@@ -995,11 +1253,18 @@ def api_cal_save():
             if name not in cal or mid not in motors:
                 continue
             r = motors[mid]
-            spread = r["max"] - r["min"]
-            if spread < 50:
-                warnings.append(f"{role}/{name}: only {spread} ticks — may not have been moved")
-            cal[name]["range_min"] = r["min"]
-            cal[name]["range_max"] = r["max"]
+            new_spread = r["max"] - r["min"]
+            old_min = cal[name].get("range_min", 0)
+            old_max = cal[name].get("range_max", 4095)
+            old_spread = old_max - old_min
+
+            if new_spread < 50:
+                warnings.append(f"{role}/{name}: only {new_spread} ticks — skipping (would narrow from {old_spread})")
+                continue  # NEVER overwrite good calibration with bad data
+
+            # Only widen ranges, never narrow — take the union of old and new
+            cal[name]["range_min"] = min(r["min"], old_min)
+            cal[name]["range_max"] = max(r["max"], old_max)
         with open(cal_path, "w") as f:
             json.dump(cal, f, indent=4)
 
@@ -1261,6 +1526,373 @@ def api_selftest():
 
 
 # ------------------------------------------------------------------ #
+# Routes — auto-calibrate (cybernetic limit probing)                   #
+# ------------------------------------------------------------------ #
+
+NAME_TO_ID = {v: k for k, v in ID_NAMES.items()}  # reverse of ID_NAMES
+
+@app.route("/api/autocalibrate", methods=["POST"])
+def api_autocalibrate():
+    """Cybernetic self-calibration: probe each joint to find its real physical
+    limits by slowly creeping until load resistance is detected.
+
+    For each joint:
+      1. From current position, creep toward 0 at PROBE_STEP counts/cycle
+      2. When load > threshold for 3 consecutive reads, OR motor stalls, record as range_min
+      3. Return to start, then creep toward 4095
+      4. Same detection for range_max
+      5. Apply safety margin (5% inward on each side)
+
+    Finds actual workspace boundaries — desk, cables, mechanical stops —
+    not just encoder range. The feedback loop is the calibration.
+
+    Body: {"label": "follower", "joints": ["elbow_flex"], "save": true}
+    """
+    data = request.get_json(force=True) or {}
+    label = data.get("label", "follower")
+    requested_joints = data.get("joints", list(NAME_TO_ID.keys()))
+    margin = data.get("margin", 0.05)
+    save_results = data.get("save", False)
+
+    if teleop_active:
+        return jsonify({"error": "Stop teleop before auto-calibrating"}), 409
+
+    with state_lock:
+        target_port = assignment.get(label)
+        board = boards.get(target_port) if target_port else None
+    if board is None:
+        return jsonify({"error": f"No board for '{label}'. Assign arm first."}), 404
+
+    PROBE_STEP = 10          # counts per cycle — very slow creep
+    PROBE_LOAD_THRESH = 200  # load indicating resistance
+    PROBE_CONFIRM = 3        # consecutive high-load reads to confirm
+    PROBE_SPEED = 60         # servo speed during probing
+    SETTLE = 0.15            # seconds between steps
+    MAX_STEPS = 500          # don't probe more than 5000 counts per direction
+
+    results = {}
+
+    for joint_name in requested_joints:
+        mid = NAME_TO_ID.get(joint_name)
+        if mid is None or mid not in board["ids"]:
+            results[joint_name] = {"status": "skipped", "reason": "not found"}
+            continue
+
+        with state_lock:
+            start_pos = board["positions"].get(mid)
+        if start_pos is None:
+            results[joint_name] = {"status": "skipped", "reason": "no position read"}
+            continue
+
+        # Suppress stall detection for the full probe duration
+        move_grace[mid] = time.time() + (MAX_STEPS * SETTLE * 2) + 30
+        with state_lock:
+            ph, handler = board["ph"], board["handler"]
+            board["safety_disabled"][mid] = False
+            board["stall_counts"][mid] = 0
+            write_register(ph, handler, mid, SPEED_ADDR, PROBE_SPEED, length=2)
+            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+
+        def _probe_direction(start, step):
+            """Probe in one direction. Returns the position where limit was found."""
+            high_count = 0
+            current = start
+            for i in range(MAX_STEPS):
+                target = max(0, min(4095, current + step))
+                with state_lock:
+                    write_register(ph, handler, mid, GOAL_POSITION_ADDR, target, length=2)
+                time.sleep(SETTLE)
+                with state_lock:
+                    actual = board["positions"].get(mid, target)
+                    load = board["loads"].get(mid, 0) or 0
+
+                moved = abs(actual - current) >= 2
+                if load > PROBE_LOAD_THRESH:
+                    high_count += 1
+                elif not moved and i > 5:
+                    high_count += 1  # mechanical stop (no load sensor response)
+                else:
+                    high_count = 0
+
+                if high_count >= PROBE_CONFIRM:
+                    return actual
+                current = actual
+            return current  # hit MAX_STEPS
+
+        # Probe toward min (negative direction)
+        found_min = _probe_direction(start_pos, -PROBE_STEP)
+
+        # Return to start
+        with state_lock:
+            write_register(ph, handler, mid, GOAL_POSITION_ADDR, start_pos, length=2)
+        time.sleep(1.0)
+
+        # Probe toward max (positive direction)
+        with state_lock:
+            current_after_return = board["positions"].get(mid, start_pos)
+        found_max = _probe_direction(current_after_return, PROBE_STEP)
+
+        # Return to start, disable torque
+        with state_lock:
+            write_register(ph, handler, mid, GOAL_POSITION_ADDR, start_pos, length=2)
+        time.sleep(0.8)
+        with state_lock:
+            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+
+        # Apply margin
+        spread = found_max - found_min
+        margin_counts = int(spread * margin)
+        safe_min = found_min + margin_counts
+        safe_max = found_max - margin_counts
+
+        results[joint_name] = {
+            "status": "ok",
+            "raw_min": found_min, "raw_max": found_max,
+            "spread": spread,
+            "safe_min": safe_min, "safe_max": safe_max,
+            "margin": margin,
+            "start_pos": start_pos,
+        }
+
+    # Optionally write to calibration file
+    if save_results:
+        cal_path = CAL_PATHS.get(label)
+        if cal_path and cal_path.exists():
+            try:
+                cal = json.loads(cal_path.read_text())
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                backup = CAL_HISTORY_DIR / f"{label}_{ts}_pre_autocal.json"
+                with open(backup, "w") as f:
+                    json.dump({"_backup_of": str(cal_path), "_timestamp": ts, **cal}, f, indent=4)
+                for jname, r in results.items():
+                    if r["status"] == "ok" and jname in cal:
+                        cal[jname]["range_min"] = r["safe_min"]
+                        cal[jname]["range_max"] = r["safe_max"]
+                with open(cal_path, "w") as f:
+                    json.dump(cal, f, indent=4)
+                push_event("autocalibration_saved", {"label": label, "joints": list(results.keys())})
+            except Exception as e:
+                return jsonify({"error": f"Save failed: {e}", "results": results}), 500
+
+    push_event("autocalibration_complete", {"label": label, "results": results})
+    return jsonify({"label": label, "joints": results, "saved": save_results})
+
+
+# ------------------------------------------------------------------ #
+# Routes — workspace mapping (pose-dependent obstacle detection)       #
+# ------------------------------------------------------------------ #
+
+WORKSPACE_FILE = SHARED_DIR / "workspace.json"
+
+@app.route("/api/workspace/probe", methods=["POST"])
+def api_workspace_probe():
+    """Level 2 workspace mapping: probe one joint's limits at multiple poses
+    of a coupled joint to build a pose-dependent obstacle map.
+
+    Example: probe elbow_flex limits at 8 different shoulder_lift positions
+    to find where the desk is at each shoulder height.
+
+    Body: {
+        "label": "follower",
+        "probe_joint": "elbow_flex",         -- joint to probe for limits
+        "sweep_joint": "shoulder_lift",       -- joint to vary
+        "sweep_min": 800, "sweep_max": 2400,  -- range to sweep (or auto from cal)
+        "sweep_steps": 8,                     -- number of positions to sample
+        "save": true                          -- persist to workspace.json
+    }
+    """
+    data = request.get_json(force=True) or {}
+    label = data.get("label", "follower")
+    probe_name = data.get("probe_joint", "elbow_flex")
+    sweep_name = data.get("sweep_joint", "shoulder_lift")
+    sweep_steps = data.get("sweep_steps", 8)
+    save = data.get("save", False)
+
+    if teleop_active:
+        return jsonify({"error": "Stop teleop first"}), 409
+
+    probe_mid = NAME_TO_ID.get(probe_name)
+    sweep_mid = NAME_TO_ID.get(sweep_name)
+    if probe_mid is None or sweep_mid is None:
+        return jsonify({"error": f"Unknown joint. Valid: {list(NAME_TO_ID.keys())}"}), 400
+
+    with state_lock:
+        target_port = assignment.get(label)
+        board = boards.get(target_port) if target_port else None
+    if board is None:
+        return jsonify({"error": f"No board for '{label}'"}), 404
+
+    # Get sweep range from calibration or request
+    cal_path = CAL_PATHS.get(label)
+    cal = {}
+    if cal_path and cal_path.exists():
+        try:
+            cal = json.loads(cal_path.read_text())
+        except Exception:
+            pass
+
+    sweep_cal = cal.get(sweep_name, {})
+    sweep_min = data.get("sweep_min", sweep_cal.get("range_min", 500))
+    sweep_max = data.get("sweep_max", sweep_cal.get("range_max", 3500))
+
+    # Generate sweep positions (evenly spaced)
+    if sweep_steps < 2:
+        sweep_steps = 2
+    sweep_positions = [
+        int(sweep_min + i * (sweep_max - sweep_min) / (sweep_steps - 1))
+        for i in range(sweep_steps)
+    ]
+
+    PROBE_STEP = 10
+    PROBE_LOAD_THRESH = 200
+    PROBE_CONFIRM = 3
+    PROBE_SPEED = 60
+    SETTLE = 0.15
+    MAX_STEPS = 400
+    MOVE_SPEED = 200
+
+    # Save starting positions
+    with state_lock:
+        start_probe = board["positions"].get(probe_mid)
+        start_sweep = board["positions"].get(sweep_mid)
+
+    samples = []  # [{sweep_pos, probe_min, probe_max, probe_min_load, probe_max_load}]
+
+    for sweep_target in sweep_positions:
+        # Move sweep joint to target position
+        move_grace[sweep_mid] = time.time() + 15
+        move_grace[probe_mid] = time.time() + (MAX_STEPS * SETTLE * 2) + 30
+        with state_lock:
+            ph, handler = board["ph"], board["handler"]
+            board["safety_disabled"][sweep_mid] = False
+            board["stall_counts"][sweep_mid] = 0
+            write_register(ph, handler, sweep_mid, SPEED_ADDR, MOVE_SPEED, length=2)
+            write_register(ph, handler, sweep_mid, TORQUE_ENABLE_ADDR, 1, length=1)
+            write_register(ph, handler, sweep_mid, GOAL_POSITION_ADDR, sweep_target, length=2)
+        time.sleep(1.5)  # let sweep joint settle
+
+        # Move probe joint to mid-range so it has room to probe both directions.
+        # Under gravity, joints swing to extremes when the arm pose changes.
+        probe_cal = cal.get(probe_name, {})
+        probe_mid_pos = (probe_cal.get("range_min", 0) + probe_cal.get("range_max", 4095)) // 2
+        with state_lock:
+            board["safety_disabled"][probe_mid] = False
+            board["stall_counts"][probe_mid] = 0
+            write_register(ph, handler, probe_mid, SPEED_ADDR, MOVE_SPEED, length=2)
+            write_register(ph, handler, probe_mid, TORQUE_ENABLE_ADDR, 1, length=1)
+            write_register(ph, handler, probe_mid, GOAL_POSITION_ADDR, probe_mid_pos, length=2)
+        time.sleep(2.0)  # let probe joint reach mid-range
+        with state_lock:
+            write_register(ph, handler, probe_mid, SPEED_ADDR, PROBE_SPEED, length=2)
+            probe_start = board["positions"].get(probe_mid, probe_mid_pos)
+
+        # Probe toward min
+        def _probe(start_pos, step):
+            high_count = 0
+            current = start_pos
+            for i in range(MAX_STEPS):
+                t = max(0, min(4095, current + step))
+                with state_lock:
+                    write_register(ph, handler, probe_mid, GOAL_POSITION_ADDR, t, length=2)
+                time.sleep(SETTLE)
+                with state_lock:
+                    actual = board["positions"].get(probe_mid, t)
+                    load = board["loads"].get(probe_mid, 0) or 0
+                moved = abs(actual - current) >= 2
+                if load > PROBE_LOAD_THRESH:
+                    high_count += 1
+                elif not moved and i > 5:
+                    high_count += 1
+                else:
+                    high_count = 0
+                if high_count >= PROBE_CONFIRM:
+                    return actual, load
+                current = actual
+            return current, 0
+
+        found_min, min_load = _probe(probe_start, -PROBE_STEP)
+
+        # Return probe to start
+        with state_lock:
+            write_register(ph, handler, probe_mid, GOAL_POSITION_ADDR, probe_start, length=2)
+        time.sleep(1.0)
+
+        # Probe toward max
+        with state_lock:
+            cur = board["positions"].get(probe_mid, probe_start)
+        found_max, max_load = _probe(cur, PROBE_STEP)
+
+        # Return probe
+        with state_lock:
+            write_register(ph, handler, probe_mid, GOAL_POSITION_ADDR, probe_start, length=2)
+        time.sleep(0.5)
+
+        with state_lock:
+            actual_sweep = board["positions"].get(sweep_mid, sweep_target)
+
+        samples.append({
+            "sweep_pos": actual_sweep,
+            "probe_min": found_min,
+            "probe_max": found_max,
+            "probe_min_load": min_load,
+            "probe_max_load": max_load,
+        })
+
+    # Return both joints to start, disable torque
+    with state_lock:
+        write_register(ph, handler, probe_mid, GOAL_POSITION_ADDR, start_probe or 2048, length=2)
+        write_register(ph, handler, sweep_mid, GOAL_POSITION_ADDR, start_sweep or 2048, length=2)
+    time.sleep(1.0)
+    with state_lock:
+        write_register(ph, handler, probe_mid, TORQUE_ENABLE_ADDR, 0, length=1)
+        write_register(ph, handler, sweep_mid, TORQUE_ENABLE_ADDR, 0, length=1)
+
+    result = {
+        "label": label,
+        "probe_joint": probe_name,
+        "sweep_joint": sweep_name,
+        "samples": samples,
+        "sweep_range": [sweep_min, sweep_max],
+        "sweep_steps": sweep_steps,
+    }
+
+    # Save to workspace.json
+    if save:
+        workspace = {}
+        if WORKSPACE_FILE.exists():
+            try:
+                workspace = json.loads(WORKSPACE_FILE.read_text())
+            except Exception:
+                pass
+        key = f"{label}/{probe_name}_vs_{sweep_name}"
+        workspace[key] = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "samples": samples,
+        }
+        with open(WORKSPACE_FILE, "w") as f:
+            json.dump(workspace, f, indent=2)
+        result["saved_to"] = str(WORKSPACE_FILE)
+
+    push_event("workspace_probe_complete", {
+        "label": label, "probe": probe_name, "sweep": sweep_name,
+        "samples": len(samples),
+    })
+
+    return jsonify(result)
+
+
+@app.route("/api/workspace", methods=["GET"])
+def api_workspace():
+    """Return saved workspace map data."""
+    if not WORKSPACE_FILE.exists():
+        return jsonify({"maps": {}, "note": "No workspace data yet. Run /api/workspace/probe."})
+    try:
+        return jsonify(json.loads(WORKSPACE_FILE.read_text()))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ------------------------------------------------------------------ #
 # Routes — shared state                                               #
 # ------------------------------------------------------------------ #
 
@@ -1334,6 +1966,20 @@ def api_move():
         else:
             clamped_positions[mid] = goal
     positions = clamped_positions
+
+    # ── Clamp to workspace limits (P9: environment-aware) ────────────
+    # Workspace limits from probing override calibration where more restrictive
+    try:
+        ws = _safety.get("workspace", {}).get(label, {})
+        for jname, ws_limits in ws.items():
+            mid = NAME_TO_ID.get(jname)
+            if mid is not None and mid in positions:
+                if "hard_min" in ws_limits:
+                    positions[mid] = max(ws_limits["hard_min"], positions[mid])
+                if "hard_max" in ws_limits:
+                    positions[mid] = min(ws_limits["hard_max"], positions[mid])
+    except Exception:
+        pass  # workspace limits are advisory — don't block moves on parse errors
 
     with state_lock:
         # Find the board assigned to the requested label
@@ -1454,7 +2100,9 @@ def api_move():
 
 @app.route("/api/teleop/start", methods=["POST"])
 def api_teleop_start():
-    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_collision
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_collision, teleop_slow_mode, teleop_cycle_count, teleop_log
+    data = request.get_json(force=True) or {}
+    slow = data.get("slow", False)
     cal = _load_teleop_cal()
     if "leader" not in cal or "follower" not in cal:
         return jsonify({"error": "calibration files missing for leader or follower"}), 400
@@ -1467,13 +2115,50 @@ def api_teleop_start():
             return jsonify({"error": "leader not connected"}), 400
         f_board = boards[f_port]
         l_board = boards[l_port]
-        # Pre-flight: refuse if any follower motor is overheated
-        TELEOP_TEMP_LIMIT = TEMP_CUTOFF_C - 5  # 5°C safety margin below cutoff
+
+        # Pre-flight 1: refuse if any follower motor is overheated
+        TELEOP_TEMP_LIMIT = TEMP_CUTOFF_C - 5
         hot = {ID_NAMES.get(mid, str(mid)): t
                for mid in f_board["ids"]
                if (t := f_board["temps"].get(mid)) is not None and t >= TELEOP_TEMP_LIMIT}
         if hot:
             return jsonify({"error": f"Motors too hot to start teleop: {hot}. Wait for cooling."}), 409
+
+        # Pre-flight 2: refuse if follower joints are far outside calibrated range
+        fc_map = cal.get("follower", {})
+        lc_map = cal.get("leader", {})
+        out_of_range = {}
+        OUT_OF_RANGE_TOLERANCE = 50
+        for mid in f_board["ids"]:
+            name = ID_NAMES.get(mid)
+            if not name:
+                continue
+            fc = fc_map.get(name)
+            if fc is None:
+                continue
+            f_raw = f_board["positions"].get(mid)
+            if f_raw is None:
+                continue
+            r_min = fc.get("range_min", 0)
+            r_max = fc.get("range_max", 4095)
+            if f_raw < r_min - OUT_OF_RANGE_TOLERANCE:
+                out_of_range[name] = {"pos": f_raw, "range_min": r_min, "range_max": r_max,
+                                      "below_by": r_min - f_raw}
+            elif f_raw > r_max + OUT_OF_RANGE_TOLERANCE:
+                out_of_range[name] = {"pos": f_raw, "range_min": r_min, "range_max": r_max,
+                                      "above_by": f_raw - r_max}
+
+        if out_of_range:
+            print(f"[teleop] REFUSED — follower joints outside calibrated range:")
+            for name, info in out_of_range.items():
+                print(f"  {name}: pos={info['pos']} range=[{info['range_min']}, {info['range_max']}]")
+            push_event("teleop_refused", {"reason": "out_of_range", "joints": out_of_range})
+            return jsonify({
+                "error": f"Follower joints outside calibrated range: {list(out_of_range.keys())}. "
+                         f"Move the arm into a safe pose before starting teleop.",
+                "out_of_range": out_of_range,
+            }), 409
+
         ph, handler = f_board["ph"], f_board["handler"]
         for mid in f_board["ids"]:
             f_board["safety_disabled"][mid] = False
@@ -1481,15 +2166,19 @@ def api_teleop_start():
             f_board["stall_counts"][mid]    = 0
             write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+
         # Seed ramp and wrap-detection from current follower positions
         teleop_positions = dict(f_board["positions"])
         teleop_prev_pos  = dict(f_board["positions"])
         teleop_halted.clear()
         teleop_collision = {}
-        # Snapshot leader positions mapped to follower — equalization target
-        lc_map = cal.get("leader", {})
-        fc_map = cal.get("follower", {})
+        teleop_cycle_count = 0
+        teleop_log.clear()
+        # Equalization targets: map leader -> follower, clamped to safe range
+        CAL_MARGIN = 0.05
         eq_targets = {}
+        large_gaps = {}
+        startup_state = {}
         for mid in f_board["ids"]:
             name = ID_NAMES.get(mid)
             if not name:
@@ -1497,16 +2186,94 @@ def api_teleop_start():
             lc = lc_map.get(name)
             fc = fc_map.get(name)
             l_raw = l_board["positions"].get(mid)
+            f_raw = f_board["positions"].get(mid)
             if lc and fc and l_raw is not None:
                 target = _map_position(l_raw, lc, fc)
-                eq_targets[mid] = target
+                # Clamp target inside follower safe range
+                r_min = fc.get("range_min", 0)
+                r_max = fc.get("range_max", 4095)
+                spread = r_max - r_min
+                margin = int(spread * CAL_MARGIN)
+                clamped = max(r_min + margin, min(r_max - margin, target))
+                gap = abs(f_raw - clamped) if f_raw is not None else 0
+                eq_targets[mid] = clamped
+                if gap > TELEOP_LARGE_GAP:
+                    large_gaps[name] = int(gap)
+                startup_state[name] = {
+                    "f_pos": f_raw, "l_pos": l_raw,
+                    "target": int(target), "clamped": int(clamped),
+                    "gap": int(gap), "range": [r_min, r_max],
+                }
+
         teleop_eq_targets  = eq_targets
         teleop_equalizing  = True
+        teleop_slow_mode   = slow
         teleop_cal         = cal
         teleop_active      = True
-    push_event("teleop_started", {"phase": "equalizing", "joints": len(eq_targets)})
-    return jsonify({"ok": True, "phase": "equalizing",
-                    "note": f"Equalizing {len(eq_targets)} joints"})
+
+    # Log startup state
+    mode_desc = "slow/explore" if slow else "normal"
+    print(f"\n[teleop] === START ({mode_desc}) ===")
+    for name, s in startup_state.items():
+        flag = " ** LARGE GAP" if name in large_gaps else ""
+        print(f"  {name:<16} f={s['f_pos']:>5}  l={s['l_pos']:>5}"
+              f"  target={s['clamped']:>5}  gap={s['gap']:>4}"
+              f"  range=[{s['range'][0]},{s['range'][1]}]{flag}")
+
+    push_event("teleop_started", {"phase": "equalizing", "joints": len(eq_targets),
+                                   "mode": mode_desc, "large_gaps": large_gaps,
+                                   "startup_state": startup_state})
+    note = f"Equalizing {len(eq_targets)} joints"
+    if large_gaps:
+        note += f", {len(large_gaps)} with large gaps (will ramp safely): {list(large_gaps.keys())}"
+    return jsonify({"ok": True, "phase": "equalizing", "mode": mode_desc,
+                    "large_gaps": large_gaps, "startup_state": startup_state, "note": note})
+
+
+@app.route("/api/teleop/debug", methods=["GET"])
+def api_teleop_debug():
+    """Return detailed teleop state for debugging."""
+    with state_lock:
+        f_port = assignment.get("follower")
+        l_port = assignment.get("leader")
+        f_safety = {}
+        f_temps = {}
+        if f_port and f_port in boards:
+            fb = boards[f_port]
+            for mid in fb["ids"]:
+                n = ID_NAMES.get(mid, str(mid))
+                f_safety[n] = {
+                    "disabled": fb["safety_disabled"].get(mid),
+                    "cause": fb["safety_cause"].get(mid),
+                    "stall_count": fb["stall_counts"].get(mid),
+                }
+                f_temps[n] = fb["temps"].get(mid)
+        return jsonify({
+            "teleop_active": teleop_active,
+            "teleop_equalizing": teleop_equalizing,
+            "cycle_count": teleop_cycle_count,
+            "halted": [ID_NAMES.get(m, str(m)) for m in teleop_halted],
+            "collision": {ID_NAMES.get(m, str(m)): v for m, v in teleop_collision.items()},
+            "positions_sent": {ID_NAMES.get(m, str(m)): v for m, v in teleop_positions.items()},
+            "eq_targets": {ID_NAMES.get(m, str(m)): v for m, v in teleop_eq_targets.items()},
+            "safety": f_safety,
+            "temps": f_temps,
+            "cal_loaded": {"leader": list(teleop_cal.get("leader", {}).keys()),
+                           "follower": list(teleop_cal.get("follower", {}).keys())},
+            "recent_log": teleop_log[-5:] if teleop_log else [],
+        })
+
+
+@app.route("/api/teleop/log", methods=["GET"])
+def api_teleop_log():
+    """Return recent teleop cycle log. ?last=N to limit (default 50)."""
+    n = request.args.get("last", 50, type=int)
+    return jsonify({
+        "cycle_count": teleop_cycle_count,
+        "active": teleop_active,
+        "equalizing": teleop_equalizing,
+        "entries": teleop_log[-n:],
+    })
 
 
 @app.route("/api/teleop/stop", methods=["POST"])
@@ -1554,6 +2321,7 @@ if __name__ == "__main__":
     else:
         print("  No boards found — will auto-detect when connected.")
 
+    _load_persistent_cal_ranges()
     threading.Thread(target=poll_loop, daemon=True).start()
 
     print(f"\nShared state: {STATE_FILE}")

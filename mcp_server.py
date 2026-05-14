@@ -426,6 +426,72 @@ def selftest(label: str = "follower") -> dict:
 
 
 @mcp.tool()
+def autocalibrate(joints: list[str] | None = None, label: str = "follower", save: bool = False) -> dict:
+    """Cybernetic self-calibration: slowly probe each joint to find real physical
+    limits by detecting load resistance (desk, cables, mechanical stops).
+
+    Each joint creeps at 10 counts/cycle until load spikes or motor stalls,
+    recording the boundary. Applies 5% safety margin. Much more accurate than
+    manual sweep because it finds the actual workspace, not just encoder range.
+
+    Takes 30-60 seconds per joint. Teleop must be stopped first.
+
+    Args:
+        joints: List of joints to probe, e.g. ["elbow_flex", "wrist_roll"]. Default: all joints.
+        label: Which arm — "follower" or "leader"
+        save: If True, write results to calibration file (with backup). Default: False (dry run).
+    """
+    # P2: pre-flight
+    err, state = _preflight(label)
+    if err:
+        return err
+
+    body = {"label": label, "save": save}
+    if joints:
+        body["joints"] = joints
+    return _post("/api/autocalibrate", body)
+
+
+@mcp.tool()
+def workspace_probe(probe_joint: str, sweep_joint: str, sweep_steps: int = 8,
+                    label: str = "follower", save: bool = True) -> dict:
+    """Map workspace obstacles by probing one joint at multiple positions of another.
+
+    Builds a pose-dependent obstacle map. Example: probe elbow_flex limits at
+    8 shoulder_lift positions to find where the desk is at each height.
+
+    Returns a table of (sweep_position, probe_min, probe_max) samples that
+    describes the reachable workspace surface. Saves to shared/workspace.json.
+
+    Takes 2-4 minutes total (30s per sweep step). Teleop must be stopped.
+
+    Args:
+        probe_joint: Joint to find limits of (e.g. "elbow_flex")
+        sweep_joint: Joint to vary (e.g. "shoulder_lift")
+        sweep_steps: Number of positions to sample (default 8)
+        label: Which arm
+        save: Persist results to workspace.json (default True)
+    """
+    err, state = _preflight(label)
+    if err:
+        return err
+
+    return _post("/api/workspace/probe", {
+        "label": label,
+        "probe_joint": probe_joint,
+        "sweep_joint": sweep_joint,
+        "sweep_steps": sweep_steps,
+        "save": save,
+    })
+
+
+@mcp.tool()
+def get_workspace() -> dict:
+    """Get the saved workspace obstacle map (from previous workspace_probe runs)."""
+    return _get("/api/workspace")
+
+
+@mcp.tool()
 def search_conversations(query: str, max_results: int = 10) -> dict:
     """Search through conversation history (all Claude Code sessions with the user).
 
