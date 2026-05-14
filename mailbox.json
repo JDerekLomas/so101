@@ -201,7 +201,7 @@
     "id": "handoff-session-10b",
     "ts": 1778760000.0,
     "from": "claude-session-10",
-    "text": "Session 10 (this session): MCP testing plan phases 1-4 executed. All MCP tools work live. KEY FIXES: (1) Safety framework: shared/safety.json defines 7 principles (P1-P7) and all thresholds. Both ui/app.py and mcp_server.py import from it. (2) Ramped moves: /api/move accepts 'ramped':true, steps at 60 counts/cycle — no more teleporting. MCP sends ramped by default. (3) Pre-flight checks in MCP: refuses moves during teleop, checks temps, warns on large moves. (4) Stall recovery grace: 2s window after commanded moves where stall detection is suppressed, so motors can escape stall zones. (5) Elbow_flex range_min raised 24->300 (desk collision prevention). (6) start_teleop/stop_teleop MCP tools added. teleop_active now in robot_state.json. (7) Session log backfilled for sessions 1-3,6. Hook instructions strengthened. (8) Testing plan fully updated with results. STILL NEEDS: (a) Claude Code restart to pick up new MCP server with pre-flight checks. (b) Speed register writes (addr 46) in UI teleop loop for proportional speed. (c) Full calibration round-trip test via MCP. (d) First dataset recording episode.",
+    "text": "Session 10 (this session): MCP testing plan phases 1-4 executed. All MCP tools work live. KEY FIXES: (1) Safety framework: shared/safety.json defines 7 principles (P1-P7) and all thresholds. Both ui/app.py and mcp_server.py import from it. (2) Ramped moves: /api/move accepts 'ramped':true, steps at 60 counts/cycle \u2014 no more teleporting. MCP sends ramped by default. (3) Pre-flight checks in MCP: refuses moves during teleop, checks temps, warns on large moves. (4) Stall recovery grace: 2s window after commanded moves where stall detection is suppressed, so motors can escape stall zones. (5) Elbow_flex range_min raised 24->300 (desk collision prevention). (6) start_teleop/stop_teleop MCP tools added. teleop_active now in robot_state.json. (7) Session log backfilled for sessions 1-3,6. Hook instructions strengthened. (8) Testing plan fully updated with results. STILL NEEDS: (a) Claude Code restart to pick up new MCP server with pre-flight checks. (b) Speed register writes (addr 46) in UI teleop loop for proportional speed. (c) Full calibration round-trip test via MCP. (d) First dataset recording episode.",
     "tags": [
       "handoff",
       "safety-framework",
@@ -214,7 +214,7 @@
     "id": "handoff-session-10c",
     "ts": 1778760600.0,
     "from": "claude-session-10b",
-    "text": "Leader velocity feedforward added to UI teleop loop (commit b2d1f41). Formula: speed = 1.2*|error| + 0.6*|leader_vel|, clamped [80,500]. Reads PRESENT_SPEED_ADDR (58) each cycle during live tracking. Speed register writes (addr 46) were already ported by parallel worker. Encoder wrap detection also already present. Server needs restart to pick up changes. Speed register open question resolved — now in session_log open_questions: test with restart, check leader vel register returns useful values at 20Hz.",
+    "text": "Leader velocity feedforward added to UI teleop loop (commit b2d1f41). Formula: speed = 1.2*|error| + 0.6*|leader_vel|, clamped [80,500]. Reads PRESENT_SPEED_ADDR (58) each cycle during live tracking. Speed register writes (addr 46) were already ported by parallel worker. Encoder wrap detection also already present. Server needs restart to pick up changes. Speed register open question resolved \u2014 now in session_log open_questions: test with restart, check leader vel register returns useful values at 20Hz.",
     "tags": [
       "handoff",
       "teleop",
@@ -227,7 +227,7 @@
     "id": "handoff-session-10d",
     "ts": 1778761200.0,
     "from": "claude-session-10b",
-    "text": "Ramped moves now read actual position each cycle (commit 05d5c10). Previously tracked assumed positions in a 'sent' dict — would drift if motor stalled under load. Now reads board['positions'] (poll loop, 20Hz fresh) so ramp self-corrects. Implements P2 (know before move) at the servo level. Other worker is making parallel changes: always-on calibration tracking, exception handling in auto_scan, updated MCP cal tools. No conflicts — our changes are to different sections of app.py.",
+    "text": "Ramped moves now read actual position each cycle (commit 05d5c10). Previously tracked assumed positions in a 'sent' dict \u2014 would drift if motor stalled under load. Now reads board['positions'] (poll loop, 20Hz fresh) so ramp self-corrects. Implements P2 (know before move) at the servo level. Other worker is making parallel changes: always-on calibration tracking, exception handling in auto_scan, updated MCP cal tools. No conflicts \u2014 our changes are to different sections of app.py.",
     "tags": [
       "handoff",
       "ramped-moves",
@@ -254,7 +254,25 @@
     "id": "handoff-session-11b",
     "ts": 1778763600.0,
     "from": "claude-session-11b",
-    "text": "Session 11b: Cybernetic world model. (1) /api/autocalibrate probes joints via load feedback — finds physical limits. (2) /api/workspace/probe maps obstacles across joint pairs — probed elbow_flex at 8 shoulder_lift positions, found desk at ~100-150. (3) P9 safety principle: workspace limits in safety.json clamp positions in /api/move and teleop. Three-layer safety: workspace->calibration->collision. (4) Tested: sent elbow_flex=50, clamped to 255. Desk can't be hit through any code path. (5) 25 MCP tools, all auto-approved. Commits: 7b17e2f, cf932a8, dda0648.",
-    "tags": ["handoff", "workspace", "autocalibrate", "P9", "world-model"]
+    "text": "Session 11b: Cybernetic world model. (1) /api/autocalibrate probes joints via load feedback \u2014 finds physical limits. (2) /api/workspace/probe maps obstacles across joint pairs \u2014 probed elbow_flex at 8 shoulder_lift positions, found desk at ~100-150. (3) P9 safety principle: workspace limits in safety.json clamp positions in /api/move and teleop. Three-layer safety: workspace->calibration->collision. (4) Tested: sent elbow_flex=50, clamped to 255. Desk can't be hit through any code path. (5) 25 MCP tools, all auto-approved. Commits: 7b17e2f, cf932a8, dda0648.",
+    "tags": [
+      "handoff",
+      "workspace",
+      "autocalibrate",
+      "P9",
+      "world-model"
+    ]
+  },
+  {
+    "id": "handoff-session-12",
+    "ts": 1778764426.018432,
+    "from": "claude-session-12",
+    "text": "Session 12 (continuation): Fixed equalization safety. (1) Collision detection now active during equalization with 2x threshold (700 vs 350). Previously disabled entirely \u2014 elbow pushed into desk at load=1000. (2) Workspace limits applied to equalization targets (line 2192). (3) Root cause of desk collision: leader elbow at 4058, follower at 108 (on desk), equalization ramps 3526 counts but motor cannot physically lift off desk surface. Collision detection catches this and freezes joint. (4) Physical fix needed: match leader to follower position before starting teleop, or manually lift follower off desk. Server restarted with both fixes live.",
+    "tags": [
+      "handoff",
+      "equalization-safety",
+      "collision-detection",
+      "sync"
+    ]
   }
 ]

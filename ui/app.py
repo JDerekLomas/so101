@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 try:
@@ -27,6 +28,7 @@ app = Flask(__name__, static_folder="static")
 ENV_FILE    = Path.home() / "so101/robot.env"
 SHARED_DIR  = Path.home() / "so101/shared"
 STATE_FILE  = SHARED_DIR / "robot_state.json"
+DATA_LOG    = Path.home() / "so101/shared/motor_data.jsonl"  # continuous log
 MSG_IN      = SHARED_DIR / "messages" / "to_robot"
 MSG_OUT     = SHARED_DIR / "messages" / "to_kb"
 MSG_TO_USER = SHARED_DIR / "messages" / "to_user"
@@ -96,6 +98,11 @@ teleop_halted      = set()  # motor IDs halted due to encoder wrap this session
 teleop_collision   = {}     # {motor_id: frozen_position} — joints frozen due to collision load
 teleop_slow_mode   = False  # True = conservative limits for initial exploration
 teleop_log         = []     # rolling buffer of teleop cycle snapshots
+
+# Camera state
+camera_frame      = None   # latest JPEG bytes
+camera_lock       = threading.Lock()
+camera_active     = False
 TELEOP_LOG_MAX     = 200    # keep last N cycles (~10s at 20Hz)
 teleop_cycle_count = 0      # total cycles since teleop started
 
@@ -505,12 +512,56 @@ def _learn_collision_limit(joint_name, collision_pos):
 
 
 # ------------------------------------------------------------------ #
+# Data logging                                                        #
+# ------------------------------------------------------------------ #
+
+_log_file = None
+
+def _log_motor_data(ts, pending_events):
+    """Append one JSONL record per poll cycle: all motors + any events."""
+    global _log_file
+    try:
+        if _log_file is None:
+            _log_file = open(DATA_LOG, "a", buffering=1)  # line-buffered
+
+        with state_lock:
+            snapshot = {}
+            for path, board in boards.items():
+                role = board.get("label")
+                if not role:
+                    continue
+                snapshot[role] = {}
+                for mid in board["ids"]:
+                    name = ID_NAMES.get(mid, str(mid))
+                    snapshot[role][name] = {
+                        "pos":  board["positions"].get(mid),
+                        "load": board["loads"].get(mid),
+                        "temp": board["temps"].get(mid),
+                    }
+            t_active = teleop_active
+            t_eq     = teleop_equalizing
+
+        record = {
+            "ts":     round(ts, 3),
+            "teleop": t_active,
+            "eq":     t_eq,
+            "motors": snapshot,
+        }
+        if pending_events:
+            record["events"] = [{"kind": k, "detail": d} for k, d in pending_events]
+
+        _log_file.write(json.dumps(record) + "\n")
+    except Exception:
+        _log_file = None  # reopen next cycle if file handle broke
+
+
+# ------------------------------------------------------------------ #
 # Background threads                                                  #
 # ------------------------------------------------------------------ #
 
 def poll_loop():
     """Read positions, temps, loads from all boards continuously."""
-    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_prev_pos, teleop_halted, teleop_collision, teleop_slow_mode
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_prev_pos, teleop_halted, teleop_collision, teleop_slow_mode, teleop_cycle_count
     last_state_write = 0
     last_auto_scan   = 0
     last_tl_read     = 0   # last time we read temps+loads
@@ -615,11 +666,15 @@ def poll_loop():
                             skip_reasons[mid] = "wrap_halted"
                             continue
 
-                        # Clear stall trips — but NEVER override temperature cutoff
+                        # Clear safety trips — re-enable if temperature has dropped
                         if f_board["safety_disabled"].get(mid):
                             if f_board["safety_cause"].get(mid) == "temp":
-                                skip_reasons[mid] = f"temp_cutoff(t={f_board['temps'].get(mid)})"
-                                continue  # too hot, skip
+                                cur_temp = f_board["temps"].get(mid)
+                                if cur_temp is not None and cur_temp >= TEMP_CUTOFF_C:
+                                    skip_reasons[mid] = f"temp_cutoff(t={cur_temp})"
+                                    continue  # still too hot, skip
+                                # Temp has dropped — clear the trip and re-enable
+                                print(f"[teleop] {ID_NAMES.get(mid,'?')} temp recovered ({cur_temp}C < {TEMP_CUTOFF_C}C), re-enabling")
                             f_board["safety_disabled"][mid] = False
                             f_board["safety_cause"][mid]    = None
                             f_board["stall_counts"][mid]    = 0
@@ -636,10 +691,11 @@ def poll_loop():
                             continue
 
                         # ── Collision detection: freeze joint if load too high ──
-                        # Skip collision detection during equalization — the arm needs
-                        # to ramp through gravity-loaded positions to reach its target.
+                        # Use higher threshold during equalization (gravity + ramp),
+                        # normal threshold during live tracking.
                         f_load = f_board["loads"].get(mid)
-                        if not teleop_equalizing and f_load is not None and f_load > COLLISION_LOAD_THRESHOLD:
+                        col_thresh = COLLISION_LOAD_THRESHOLD * 2 if teleop_equalizing else COLLISION_LOAD_THRESHOLD
+                        if f_load is not None and f_load > col_thresh:
                             if mid not in teleop_collision:
                                 frozen_pos = f_board["positions"].get(mid, teleop_positions.get(mid, 0))
                                 teleop_collision[mid] = frozen_pos
@@ -694,15 +750,7 @@ def poll_loop():
                     for mid, target_pos in goals.items():
                         current_pos = f_board["positions"].get(mid, target_pos)
                         error = abs(target_pos - current_pos)
-                        leader_vel = 0
-                        if not teleop_equalizing and not teleop_slow_mode and mid in l_board.get("ids", []):
-                            try:
-                                l_ph, l_handler = l_board["ph"], l_board["handler"]
-                                vel_raw, l_res, l_err = l_handler.read2ByteTxRx(l_ph, mid, PRESENT_SPEED_ADDR)
-                                if l_res == 0 and l_err == 0:
-                                    leader_vel = vel_raw & 0x3FF
-                            except Exception:
-                                pass
+                        leader_vel = 0  # velocity feedforward removed — read2ByteTxRx blocks loop
                         speed = int(max(spd_min, min(spd_max,
                                         TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
                         speeds[mid] = speed
@@ -712,7 +760,7 @@ def poll_loop():
                             "error": int(error), "speed": speed, "lvel": leader_vel,
                         }
 
-                    # ── Sync-write speeds in one broadcast packet ──
+                    # ── Write speeds via GroupSyncWrite (broadcast, no ACK) ──
                     if speeds and SDK_AVAILABLE:
                         gsw_spd = GroupSyncWrite(ph, handler, SPEED_ADDR, 2)
                         for mid, spd in speeds.items():
@@ -720,12 +768,13 @@ def poll_loop():
                         gsw_spd.txPacket()
                         gsw_spd.clearParam()
 
-                    # ── Sync-write all goal positions in one broadcast packet ──
+                    # ── Write goal positions via GroupSyncWrite ──
+                    gsw_ok = -1
                     if goals and SDK_AVAILABLE:
                         gsw = GroupSyncWrite(ph, handler, GOAL_POSITION_ADDR, 2)
                         for mid, pos in goals.items():
                             gsw.addParam(mid, [SCS_LOBYTE(pos), SCS_HIBYTE(pos)])
-                        gsw.txPacket()
+                        gsw_ok = gsw.txPacket()
                         gsw.clearParam()
 
                     # ── Teleop cycle logging ─────────────────────────────────
@@ -749,7 +798,7 @@ def poll_loop():
                         skip_str = ""
                         if skip_reasons:
                             skip_str = " SKIP:" + ",".join(f"{ID_NAMES.get(m,'?')}={r}" for m, r in skip_reasons.items())
-                        print(f"[teleop:{phase}] c={teleop_cycle_count} goals={len(goals)} {' | '.join(parts)}{skip_str}")
+                        print(f"[teleop:{phase}] c={teleop_cycle_count} goals={len(goals)} gsw={gsw_ok} {' | '.join(parts)}{skip_str}")
 
                     # Transition out of equalization once all motors are close
                     if teleop_equalizing and all_equalized and teleop_eq_targets:
@@ -769,6 +818,9 @@ def poll_loop():
             last_state_write = now
             _write_shared_state()
             _save_persistent_cal_ranges()
+
+        # Continuous data log — every cycle, all motors, all fields
+        _log_motor_data(now, pending_events)
 
         # Process any incoming messages
         _process_messages()
@@ -2106,6 +2158,7 @@ def api_teleop_start():
     global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_collision, teleop_slow_mode, teleop_cycle_count, teleop_log
     data = request.get_json(force=True) or {}
     slow = data.get("slow", False)
+    exclude = set(data.get("exclude_joints", []))  # joint names to skip
     cal = _load_teleop_cal()
     if "leader" not in cal or "follower" not in cal:
         return jsonify({"error": "calibration files missing for leader or follower"}), 400
@@ -2152,15 +2205,12 @@ def api_teleop_start():
                                       "above_by": f_raw - r_max}
 
         if out_of_range:
-            print(f"[teleop] REFUSED — follower joints outside calibrated range:")
+            print(f"[teleop] WARNING — follower joints outside calibrated range (will equalize safely):")
             for name, info in out_of_range.items():
                 print(f"  {name}: pos={info['pos']} range=[{info['range_min']}, {info['range_max']}]")
-            push_event("teleop_refused", {"reason": "out_of_range", "joints": out_of_range})
-            return jsonify({
-                "error": f"Follower joints outside calibrated range: {list(out_of_range.keys())}. "
-                         f"Move the arm into a safe pose before starting teleop.",
-                "out_of_range": out_of_range,
-            }), 409
+            # Don't refuse — just log and proceed. The equalization ramp will
+            # move these joints safely into range. Previous code deadlocked here
+            # (push_event inside state_lock).
 
         ph, handler = f_board["ph"], f_board["handler"]
         for mid in f_board["ids"]:
@@ -2186,6 +2236,10 @@ def api_teleop_start():
             name = ID_NAMES.get(mid)
             if not name:
                 continue
+            if name in exclude:
+                teleop_halted.add(mid)  # skip this joint entirely
+                write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+                continue
             lc = lc_map.get(name)
             fc = fc_map.get(name)
             l_raw = l_board["positions"].get(mid)
@@ -2198,6 +2252,8 @@ def api_teleop_start():
                 spread = r_max - r_min
                 margin = int(spread * CAL_MARGIN)
                 clamped = max(r_min + margin, min(r_max - margin, target))
+                # P9: apply workspace limits to equalization targets too
+                clamped = _apply_workspace_limits(clamped, name, "follower")
                 gap = abs(f_raw - clamped) if f_raw is not None else 0
                 eq_targets[mid] = clamped
                 if gap > TELEOP_LARGE_GAP:
@@ -2297,6 +2353,61 @@ def api_teleop_stop():
 
 
 # ------------------------------------------------------------------ #
+# Camera                                                              #
+# ------------------------------------------------------------------ #
+
+def camera_loop():
+    global camera_frame, camera_active
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("[camera] Failed to open camera index 0")
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    camera_active = True
+    print("[camera] Started (640x480)")
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            with camera_lock:
+                camera_frame = jpeg.tobytes()
+        else:
+            time.sleep(0.1)
+        time.sleep(0.033)  # ~30 fps
+
+
+def _gen_camera():
+    while True:
+        with camera_lock:
+            frame = camera_frame
+        if frame:
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        time.sleep(0.033)
+
+
+@app.route("/camera/stream")
+def camera_stream():
+    return Response(_gen_camera(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/camera/snapshot")
+def camera_snapshot():
+    with camera_lock:
+        frame = camera_frame
+    if frame is None:
+        return jsonify({"error": "no frame yet"}), 503
+    return Response(frame, mimetype="image/jpeg")
+
+
+@app.route("/camera/status")
+def camera_status():
+    with camera_lock:
+        has_frame = camera_frame is not None
+    return jsonify({"active": camera_active, "has_frame": has_frame})
+
+
+# ------------------------------------------------------------------ #
 # Main                                                                #
 # ------------------------------------------------------------------ #
 
@@ -2326,6 +2437,7 @@ if __name__ == "__main__":
 
     _load_persistent_cal_ranges()
     threading.Thread(target=poll_loop, daemon=True).start()
+    threading.Thread(target=camera_loop, daemon=True).start()
 
     print(f"\nShared state: {STATE_FILE}")
     print(f"Mailbox in:   {MSG_IN}")

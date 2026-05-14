@@ -1,57 +1,57 @@
 {
-  "_updated": 1778763820.1692731,
+  "_updated": 1778766291.0978718,
   "_doc": "Always-on calibration range tracking. Accumulates across server restarts.",
   "ranges": {
     "leader": {
       "1": {
-        "min": 744,
-        "max": 3292
+        "min": 774,
+        "max": 3327
       },
       "2": {
-        "min": 926,
-        "max": 3049
+        "min": 929,
+        "max": 2308
       },
       "3": {
         "min": 1859,
-        "max": 4060
+        "max": 4064
       },
       "4": {
-        "min": 882,
-        "max": 3057
+        "min": 879,
+        "max": 2945
       },
       "5": {
-        "min": 22,
-        "max": 4083
+        "min": 19,
+        "max": 4013
       },
       "6": {
         "min": 1845,
-        "max": 3029
+        "max": 3020
       }
     },
     "follower": {
       "1": {
-        "min": 952,
-        "max": 3497
+        "min": 1056,
+        "max": 3658
       },
       "2": {
-        "min": 657,
-        "max": 2577
+        "min": 671,
+        "max": 2458
       },
       "3": {
         "min": 0,
-        "max": 4095
+        "max": 4094
       },
       "4": {
-        "min": 959,
-        "max": 3311
+        "min": 954,
+        "max": 3316
       },
       "5": {
         "min": 6,
-        "max": 4069
+        "max": 4057
       },
       "6": {
-        "min": 1339,
-        "max": 2830
+        "min": 1349,
+        "max": 2867
       }
     }
   }
