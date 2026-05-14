@@ -36,6 +36,7 @@ BAUDRATE             = 1_000_000
 PRESENT_POSITION_ADDR = 56
 GOAL_POSITION_ADDR   = 42
 SPEED_ADDR           = 46
+PRESENT_SPEED_ADDR   = 58
 TORQUE_ENABLE_ADDR   = 40
 TEMPERATURE_ADDR     = 63
 LOAD_ADDR            = 60
@@ -84,6 +85,10 @@ teleop_equalizing  = False  # True during startup equalization phase
 teleop_eq_targets  = {}     # {motor_id: target} — snapshot of leader pos at start
 teleop_cal         = {}     # loaded once on start: {"leader": {...}, "follower": {...}}
 teleop_positions   = {}     # {motor_id: current_sent_position} — used for ramp-limiting
+teleop_prev_pos    = {}     # {motor_id: last_read_follower_pos} — for wrap detection
+teleop_halted      = set()  # motor IDs halted due to encoder wrap this session
+
+TELEOP_WRAP_THRESH = 1500   # counts — position jump this large = encoder wrap, halt joint
 
 # Max counts to move per poll cycle (20 Hz). 60 counts/step = 1200 counts/s ≈ 3.4 s full sweep.
 TELEOP_MAX_DELTA   = 60
@@ -91,6 +96,7 @@ TELEOP_EQ_THRESH   = 25    # counts — follower must be within this of target t
 
 # Proportional speed control for teleop (matches teleop_6joint.py)
 TELEOP_SPEED_K     = 1.2   # speed units per count of error
+TELEOP_SPEED_FF    = 0.6   # feedforward gain from leader velocity
 TELEOP_SPEED_MIN   = 80    # minimum speed (keeps motion smooth near target)
 TELEOP_SPEED_MAX   = 500   # maximum speed (prevents violent motion)
 
@@ -284,6 +290,7 @@ def scan_boards():
 
 def poll_loop():
     """Read positions, temps, loads from all boards continuously."""
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions
     last_state_write = 0
     last_auto_scan   = 0
     last_tl_read     = 0   # last time we read temps+loads
@@ -353,6 +360,28 @@ def poll_loop():
                     handler = f_board["handler"]
                     all_equalized = True
                     for mid in f_board["ids"]:
+                        name = ID_NAMES.get(mid, str(mid))
+
+                        # ── Encoder wrap detection ────────────────────────
+                        cur_pos = f_board["positions"].get(mid)
+                        prev_pos = teleop_prev_pos.get(mid)
+                        if cur_pos is not None and prev_pos is not None:
+                            if abs(cur_pos - prev_pos) > TELEOP_WRAP_THRESH:
+                                if mid not in teleop_halted:
+                                    teleop_halted.add(mid)
+                                    write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+                                    pending_events.append(("teleop_wrap_halt", {
+                                        "motor": mid, "name": name,
+                                        "prev": prev_pos, "cur": cur_pos,
+                                        "jump": cur_pos - prev_pos,
+                                    }))
+                        if cur_pos is not None:
+                            teleop_prev_pos[mid] = cur_pos
+
+                        # Skip halted joints
+                        if mid in teleop_halted:
+                            continue
+
                         # Clear any stall trip so all motors stay active during teleop
                         if f_board["safety_disabled"].get(mid):
                             f_board["safety_disabled"][mid] = False
@@ -390,10 +419,21 @@ def poll_loop():
                                 target = prev + TELEOP_MAX_DELTA * (1 if delta > 0 else -1)
 
                         teleop_positions[mid] = target
-                        # Proportional speed: servo moves fast when far, slow when close
+                        # Proportional speed with leader velocity feedforward:
+                        #   speed = K * |error| + FF * |leader_vel|
+                        # Feedforward anticipates leader motion so follower
+                        # doesn't fall behind during fast movements.
                         current_pos = f_board["positions"].get(mid, target)
                         error = abs(target - current_pos)
-                        speed = int(max(TELEOP_SPEED_MIN, min(TELEOP_SPEED_MAX, TELEOP_SPEED_K * error)))
+                        leader_vel = 0
+                        if not teleop_equalizing and mid in l_board["ids"]:
+                            l_ph, l_handler = l_board["ph"], l_board["handler"]
+                            vel_raw, l_res, l_err = l_handler.read2ByteTxRx(l_ph, mid, PRESENT_SPEED_ADDR)
+                            if l_res == 0 and l_err == 0:
+                                # STS3215 speed: bit 10 = direction, bits 0-9 = magnitude
+                                leader_vel = vel_raw & 0x3FF
+                        speed = int(max(TELEOP_SPEED_MIN, min(TELEOP_SPEED_MAX,
+                                        TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
                         write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
                         write_register(ph, handler, mid, GOAL_POSITION_ADDR, target, length=2)
 
@@ -629,7 +669,7 @@ def stream():
                 events = list(event_log[-5:])
                 notifs = [n for n in notifications if not n.get("dismissed")]
                 empty  = list(empty_ports)
-            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking'})}\n\n"
+            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking', 'teleop_halted': list(teleop_halted)})}\n\n"
             time.sleep(0.1)
 
     return Response(generate(), mimetype="text/event-stream",
@@ -1072,8 +1112,10 @@ def api_teleop_start():
             f_board["safety_disabled"][mid] = False
             f_board["stall_counts"][mid]    = 0
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
-        # Seed ramp from current follower positions
+        # Seed ramp and wrap-detection from current follower positions
         teleop_positions = dict(f_board["positions"])
+        teleop_prev_pos  = dict(f_board["positions"])
+        teleop_halted.clear()
         # Snapshot leader positions mapped to follower — equalization target
         lc_map = cal.get("leader", {})
         fc_map = cal.get("follower", {})
