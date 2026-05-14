@@ -8,13 +8,16 @@
     "P4_torque_is_temporary": "Torque must auto-disable after every move. Default timeout 2.5s. Teleop disables on stop.",
     "P5_detect_and_halt": "Monitor load, temperature, and encoder wraps continuously. Trip immediately on anomaly.",
     "P6_equalize_before_track": "Before starting teleop, move follower to match leader position at safe speed. Never start tracking from an unknown state.",
-    "P7_human_in_the_loop": "Notify the user on any safety trip, unusual state, or before large moves (>500 counts from current position)."
+    "P7_human_in_the_loop": "Notify the user on any safety trip, unusual state, or before large moves (>500 counts from current position).",
+    "P8_collision_freeze": "If follower motor load exceeds collision threshold during teleop, freeze that joint at current position. Unfreeze only when load drops below retreat threshold. Never push through resistance."
   },
 
   "thresholds": {
     "temp_cutoff_c": 65,
     "stall_load_threshold": 800,
     "stall_count_limit": 6,
+    "collision_load_threshold": 350,
+    "collision_retreat_load": 150,
     "encoder_wrap_threshold": 1500,
     "load_emergency_pct": 75,
     "calibration_margin": 0.05,

@@ -48,13 +48,17 @@ AUTO_SCAN_INTERVAL   = 3.0   # check for new/gone boards every 3s
 SAFETY_FILE = Path(__file__).parent.parent / "shared" / "safety.json"
 try:
     _safety = json.loads(SAFETY_FILE.read_text())
-    TEMP_CUTOFF_C        = _safety["thresholds"]["temp_cutoff_c"]
-    STALL_LOAD_THRESHOLD = _safety["thresholds"]["stall_load_threshold"]
-    STALL_COUNT_LIMIT    = _safety["thresholds"]["stall_count_limit"]
+    TEMP_CUTOFF_C             = _safety["thresholds"]["temp_cutoff_c"]
+    STALL_LOAD_THRESHOLD      = _safety["thresholds"]["stall_load_threshold"]
+    STALL_COUNT_LIMIT         = _safety["thresholds"]["stall_count_limit"]
+    COLLISION_LOAD_THRESHOLD  = _safety["thresholds"]["collision_load_threshold"]
+    COLLISION_RETREAT_LOAD    = _safety["thresholds"]["collision_retreat_load"]
 except Exception:
-    TEMP_CUTOFF_C        = 65
-    STALL_LOAD_THRESHOLD = 800
-    STALL_COUNT_LIMIT    = 6
+    TEMP_CUTOFF_C             = 65
+    STALL_LOAD_THRESHOLD      = 800
+    STALL_COUNT_LIMIT         = 6
+    COLLISION_LOAD_THRESHOLD  = 350
+    COLLISION_RETREAT_LOAD    = 150
 
 CAL_PATHS = {
     "follower": Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
@@ -88,6 +92,8 @@ teleop_cal         = {}     # loaded once on start: {"leader": {...}, "follower"
 teleop_positions   = {}     # {motor_id: current_sent_position} — used for ramp-limiting
 teleop_prev_pos    = {}     # {motor_id: last_read_follower_pos} — for wrap detection
 teleop_halted      = set()  # motor IDs halted due to encoder wrap this session
+teleop_collision   = {}     # {motor_id: frozen_position} — joints frozen due to collision load
+teleop_slow_mode   = False  # True = conservative limits for initial exploration
 
 TELEOP_WRAP_THRESH = 1500   # counts — position jump this large = encoder wrap, halt joint
 
@@ -100,6 +106,11 @@ TELEOP_SPEED_K     = 1.2   # speed units per count of error
 TELEOP_SPEED_FF    = 0.6   # feedforward gain from leader velocity
 TELEOP_SPEED_MIN   = 80    # minimum speed (keeps motion smooth near target)
 TELEOP_SPEED_MAX   = 500   # maximum speed (prevents violent motion)
+
+# Slow-mode overrides — gentle exploration (half speed, quarter delta)
+TELEOP_SLOW_MAX_DELTA  = 15   # counts/cycle → ~300 counts/s = very slow sweep
+TELEOP_SLOW_SPEED_MIN  = 30
+TELEOP_SLOW_SPEED_MAX  = 100
 
 
 # ------------------------------------------------------------------ #
@@ -220,6 +231,7 @@ def _check_safety(board, path, pending_events):
         if temp is not None and temp >= TEMP_CUTOFF_C:
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
             board["safety_disabled"][mid] = True
+            board["safety_cause"][mid]    = "temp"
             board["stall_counts"][mid]    = 0
             pending_events.append(("safety_temp_cutoff", {
                 "port": path, "motor": mid, "name": name, "temp": temp,
@@ -248,6 +260,7 @@ def _check_safety(board, path, pending_events):
             if board["stall_counts"][mid] >= STALL_COUNT_LIMIT:
                 write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
                 board["safety_disabled"][mid] = True
+                board["safety_cause"][mid]    = "stall"
                 pending_events.append(("safety_stall_trip", {
                     "port": path, "motor": mid, "name": name,
                     "load": load, "count": board["stall_counts"][mid],
@@ -275,6 +288,7 @@ def scan_boards():
                 "loads":           {mid: None  for mid in ids},
                 "stall_counts":    {mid: 0     for mid in ids},
                 "safety_disabled": {mid: False for mid in ids},
+                "safety_cause":    {mid: None  for mid in ids},  # "temp" | "stall" | None
                 "errors":    0,
                 "label":     None,
             }
@@ -291,7 +305,7 @@ def scan_boards():
 
 def poll_loop():
     """Read positions, temps, loads from all boards continuously."""
-    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_prev_pos, teleop_halted
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_prev_pos, teleop_halted, teleop_collision, teleop_slow_mode
     last_state_write = 0
     last_auto_scan   = 0
     last_tl_read     = 0   # last time we read temps+loads
@@ -386,9 +400,12 @@ def poll_loop():
                         if mid in teleop_halted:
                             continue
 
-                        # Clear any stall trip so all motors stay active during teleop
+                        # Clear stall trips so motors stay active — but NEVER override temp cutoff
                         if f_board["safety_disabled"].get(mid):
+                            if f_board["safety_cause"].get(mid) == "temp":
+                                continue  # motor is too hot — skip, don't re-enable
                             f_board["safety_disabled"][mid] = False
+                            f_board["safety_cause"][mid]    = None
                             f_board["stall_counts"][mid]    = 0
                             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
                         name = ID_NAMES.get(mid)
@@ -399,6 +416,34 @@ def poll_loop():
                         if lc is None or fc is None:
                             continue
 
+                        # ── Collision detection: freeze joint if load too high ──
+                        f_load = f_board["loads"].get(mid)
+                        if f_load is not None and f_load > COLLISION_LOAD_THRESHOLD:
+                            if mid not in teleop_collision:
+                                # Freeze: record current position, stop sending new goals
+                                frozen_pos = f_board["positions"].get(mid, teleop_positions.get(mid, 0))
+                                teleop_collision[mid] = frozen_pos
+                                # Command motor to hold where it is (not where leader wants)
+                                write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
+                                write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(frozen_pos), length=2)
+                                pending_events.append(("teleop_collision", {
+                                    "motor": mid, "name": name, "load": f_load,
+                                    "frozen_at": frozen_pos,
+                                }))
+                            continue  # skip normal tracking for this joint
+                        elif mid in teleop_collision:
+                            # Unfreeze: load dropped below retreat threshold
+                            if f_load is not None and f_load < COLLISION_RETREAT_LOAD:
+                                del teleop_collision[mid]
+                                pending_events.append(("teleop_collision_cleared", {
+                                    "motor": mid, "name": name, "load": f_load,
+                                }))
+                            else:
+                                # Still in collision zone, keep frozen
+                                frozen_pos = teleop_collision[mid]
+                                write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(frozen_pos), length=2)
+                                continue
+
                         if teleop_equalizing:
                             # Phase 1: ramp toward snapshot of leader position at start
                             target = teleop_eq_targets.get(mid)
@@ -406,9 +451,11 @@ def poll_loop():
                                 all_equalized = False  # don't transition if any motor has no target
                                 continue
                             prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
+                            # Apply slow-mode delta limit during equalization
+                            max_delta = TELEOP_SLOW_MAX_DELTA if teleop_slow_mode else TELEOP_MAX_DELTA
                             delta = target - prev
-                            if abs(delta) > TELEOP_MAX_DELTA:
-                                target = prev + TELEOP_MAX_DELTA * (1 if delta > 0 else -1)
+                            if abs(delta) > max_delta:
+                                target = prev + max_delta * (1 if delta > 0 else -1)
                                 all_equalized = False
                             elif abs(target - f_board["positions"].get(mid, target)) > TELEOP_EQ_THRESH:
                                 all_equalized = False
@@ -419,25 +466,25 @@ def poll_loop():
                                 continue
                             target = _map_position(l_raw, lc, fc)
                             prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
+                            max_delta = TELEOP_SLOW_MAX_DELTA if teleop_slow_mode else TELEOP_MAX_DELTA
                             delta = target - prev
-                            if abs(delta) > TELEOP_MAX_DELTA:
-                                target = prev + TELEOP_MAX_DELTA * (1 if delta > 0 else -1)
+                            if abs(delta) > max_delta:
+                                target = prev + max_delta * (1 if delta > 0 else -1)
 
                         teleop_positions[mid] = target
-                        # Proportional speed with leader velocity feedforward:
-                        #   speed = K * |error| + FF * |leader_vel|
-                        # Feedforward anticipates leader motion so follower
-                        # doesn't fall behind during fast movements.
+                        # Proportional speed — slow mode uses tighter bounds
+                        spd_min = TELEOP_SLOW_SPEED_MIN if teleop_slow_mode else TELEOP_SPEED_MIN
+                        spd_max = TELEOP_SLOW_SPEED_MAX if teleop_slow_mode else TELEOP_SPEED_MAX
                         current_pos = f_board["positions"].get(mid, target)
                         error = abs(target - current_pos)
                         leader_vel = 0
-                        if not teleop_equalizing and mid in l_board["ids"]:
+                        if not teleop_equalizing and not teleop_slow_mode and mid in l_board["ids"]:
                             l_ph, l_handler = l_board["ph"], l_board["handler"]
                             vel_raw, l_res, l_err = l_handler.read2ByteTxRx(l_ph, mid, PRESENT_SPEED_ADDR)
                             if l_res == 0 and l_err == 0:
                                 # STS3215 speed: bit 10 = direction, bits 0-9 = magnitude
                                 leader_vel = vel_raw & 0x3FF
-                        speed = int(max(TELEOP_SPEED_MIN, min(TELEOP_SPEED_MAX,
+                        speed = int(max(spd_min, min(spd_max,
                                         TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
                         spd_ok = write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
                         pos_ok = write_register(ph, handler, mid, GOAL_POSITION_ADDR, int(target), length=2)
@@ -698,7 +745,7 @@ def stream():
                 events = list(event_log[-5:])
                 notifs = [n for n in notifications if not n.get("dismissed")]
                 empty  = list(empty_ports)
-            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking', 'teleop_halted': list(teleop_halted)})}\n\n"
+            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking', 'teleop_halted': list(teleop_halted), 'teleop_collision': {ID_NAMES.get(k, str(k)): v for k, v in teleop_collision.items()}})}\n\n"
             time.sleep(0.1)
 
     return Response(generate(), mimetype="text/event-stream",
@@ -1086,6 +1133,15 @@ def api_selftest():
     if board is None:
         return jsonify({"error": f"No board for '{label}'. Assign arm first."}), 404
 
+    # Pre-flight temperature check — don't actuate hot motors
+    SELFTEST_TEMP_LIMIT = TEMP_CUTOFF_C - 5
+    with state_lock:
+        hot = {ID_NAMES.get(mid, str(mid)): t
+               for mid in board["ids"]
+               if (t := board["temps"].get(mid)) is not None and t >= SELFTEST_TEMP_LIMIT}
+    if hot:
+        return jsonify({"error": f"Motors too hot to self-test: {hot}. Wait for cooling."}), 409
+
     # Load calibration
     cal_path = CAL_PATHS.get(label)
     cal = {}
@@ -1223,6 +1279,8 @@ def api_positions():
     Used by the recorder at 30Hz — reads from memory, not disk."""
     with state_lock:
         result = {"teleop": teleop_active, "ts": time.time()}
+        if teleop_collision:
+            result["collision"] = {ID_NAMES.get(k, str(k)): v for k, v in teleop_collision.items()}
         for port, board in boards.items():
             label = board.get("label")
             if label in ("follower", "leader"):
@@ -1308,6 +1366,7 @@ def api_move():
 
             max_delta = TELEOP_MAX_DELTA  # counts per cycle
             remaining = dict(positions)   # {mid: final_goal}
+            collided = {}  # {mid: load} — joints stopped due to collision
 
             for _ in range(200):  # max 200 cycles = 10s at 20Hz
                 if not remaining:
@@ -1316,6 +1375,21 @@ def api_move():
                 with state_lock:
                     ph, handler = board["ph"], board["handler"]
                     for mid, goal in remaining.items():
+                        # P5: collision detection — if load > threshold, stop immediately
+                        load = board["loads"].get(mid)
+                        if load is not None and load > COLLISION_LOAD_THRESHOLD:
+                            cur = board["positions"].get(mid, goal)
+                            write_register(ph, handler, mid, GOAL_POSITION_ADDR, cur, length=2)
+                            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+                            collided[mid] = load
+                            done.append(mid)
+                            push_event("collision_detected", {
+                                "label": label, "motor": mid,
+                                "name": ID_NAMES.get(mid, str(mid)),
+                                "load": load, "position": cur,
+                            })
+                            continue
+
                         # P2: read actual position each cycle (poll loop updates at 20Hz)
                         current = board["positions"].get(mid, goal)
                         delta = goal - current
@@ -1336,7 +1410,10 @@ def api_move():
                 for mid in positions:
                     if mid in board["ids"]:
                         write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
-            push_event("move_complete", {"label": label, "positions": positions, "ramped": True})
+            result = {"label": label, "positions": positions, "ramped": True}
+            if collided:
+                result["collisions"] = {ID_NAMES.get(k, str(k)): v for k, v in collided.items()}
+            push_event("move_complete", result)
 
         threading.Thread(target=_ramped_move, daemon=True).start()
         push_event("move_start", {"label": label, "positions": positions, "ramped": True})
@@ -1377,7 +1454,7 @@ def api_move():
 
 @app.route("/api/teleop/start", methods=["POST"])
 def api_teleop_start():
-    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_collision
     cal = _load_teleop_cal()
     if "leader" not in cal or "follower" not in cal:
         return jsonify({"error": "calibration files missing for leader or follower"}), 400
@@ -1390,9 +1467,17 @@ def api_teleop_start():
             return jsonify({"error": "leader not connected"}), 400
         f_board = boards[f_port]
         l_board = boards[l_port]
+        # Pre-flight: refuse if any follower motor is overheated
+        TELEOP_TEMP_LIMIT = TEMP_CUTOFF_C - 5  # 5°C safety margin below cutoff
+        hot = {ID_NAMES.get(mid, str(mid)): t
+               for mid in f_board["ids"]
+               if (t := f_board["temps"].get(mid)) is not None and t >= TELEOP_TEMP_LIMIT}
+        if hot:
+            return jsonify({"error": f"Motors too hot to start teleop: {hot}. Wait for cooling."}), 409
         ph, handler = f_board["ph"], f_board["handler"]
         for mid in f_board["ids"]:
             f_board["safety_disabled"][mid] = False
+            f_board["safety_cause"][mid]    = None
             f_board["stall_counts"][mid]    = 0
             write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
@@ -1400,6 +1485,7 @@ def api_teleop_start():
         teleop_positions = dict(f_board["positions"])
         teleop_prev_pos  = dict(f_board["positions"])
         teleop_halted.clear()
+        teleop_collision = {}
         # Snapshot leader positions mapped to follower — equalization target
         lc_map = cal.get("leader", {})
         fc_map = cal.get("follower", {})
