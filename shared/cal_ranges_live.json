@@ -1,5 +1,5 @@
 {
-  "_updated": 1778766851.383583,
+  "_updated": 1778768623.5875552,
   "_doc": "Always-on calibration range tracking. Accumulates across server restarts.",
   "ranges": {
     "leader": {
@@ -17,7 +17,7 @@
       },
       "4": {
         "min": 879,
-        "max": 2945
+        "max": 3226
       },
       "5": {
         "min": 16,
@@ -30,7 +30,7 @@
     },
     "follower": {
       "1": {
-        "min": 1056,
+        "min": 0,
         "max": 3658
       },
       "2": {
@@ -39,7 +39,7 @@
       },
       "3": {
         "min": 0,
-        "max": 4094
+        "max": 4095
       },
       "4": {
         "min": 954,

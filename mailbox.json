@@ -274,5 +274,17 @@
       "collision-detection",
       "sync"
     ]
+  },
+  {
+    "id": "handoff-session-12b",
+    "ts": 1778768851.6322198,
+    "from": "claude-session-12b",
+    "text": "Session 12b: GitHub repo live at github.com/JDerekLomas/so101. Wave script (scripts/wave.py) with cybernetic sense-act-verify loop. Shoulder raises to 1897, wrist/gripper converge, but wrist_roll stalls during wave (load=248) and elbow stuck on desk (pos=148). Leader elbow motor 3 stuck at 4058 (dead encoder). Added exclude_joints to teleop, collision detection during equalization (2x threshold), workspace limits on equalization targets. Key insight: server P4 torque timeout too short for gravity-loaded poses \u2014 direct serial scripts needed for sustained torque.",
+    "tags": [
+      "handoff",
+      "wave",
+      "github",
+      "sync"
+    ]
   }
 ]
