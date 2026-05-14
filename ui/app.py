@@ -161,9 +161,10 @@ PREDICT_HORIZON_CYCLES = 5    # look-ahead cycles (~250ms at 20Hz)
 PREDICT_LOAD_SLOPE_THRESH = 40  # load increase per cycle that triggers early warning
 
 # Fatigue model: motors that run hot lose torque capacity
-FATIGUE_TEMP_BASELINE  = 30   # below this, no fatigue factor
-FATIGUE_TEMP_SCALE     = 40   # temp above which fatigue factor = 0.5
-FATIGUE_LOAD_DERATING  = 0.7  # at max fatigue, collision threshold * this
+FATIGUE_TEMP_BASELINE  = 40   # below this, no fatigue factor (room temp + margin)
+FATIGUE_TEMP_SCALE     = 55   # temp above which fatigue factor = max
+FATIGUE_LOAD_DERATING  = 0.8  # at max fatigue, collision threshold * this
+FATIGUE_INTEGRAL_MAX   = 3000 # heat integral ceiling (higher = slower to max out)
 
 # Bidirectional collision learning: can loosen limits over time
 CAL_LOOSEN_MIN_CYCLES  = 2000  # cycles without collision before considering loosening
@@ -565,7 +566,11 @@ def _update_fatigue(mid, temp, dt=0.05):
     integrates temperature over time and derates collision thresholds
     so a warm motor gets protected earlier.
 
-    Returns: derating factor (1.0 = healthy, 0.7 = fatigued)
+    Tuned so normal operating temps (30-40C) cause no derating.
+    Only sustained temps above 40C start accumulating stress.
+    Decay rate is fast enough that cooling motors recover quickly.
+
+    Returns: derating factor (1.0 = healthy, 0.8 = fatigued)
     """
     if mid not in motor_fatigue:
         motor_fatigue[mid] = {"heat_integral": 0.0, "derating": 1.0}
@@ -573,16 +578,15 @@ def _update_fatigue(mid, temp, dt=0.05):
     f = motor_fatigue[mid]
 
     if temp is not None and temp > FATIGUE_TEMP_BASELINE:
-        # Accumulate heat stress
+        # Accumulate heat stress — only above 40C
         excess = temp - FATIGUE_TEMP_BASELINE
-        f["heat_integral"] += excess * dt
+        f["heat_integral"] = min(FATIGUE_INTEGRAL_MAX, f["heat_integral"] + excess * dt)
     else:
-        # Cool down: decay heat integral
-        f["heat_integral"] = max(0, f["heat_integral"] - 2.0 * dt)
+        # Cool down: fast decay so motors recover when they cool
+        f["heat_integral"] = max(0, f["heat_integral"] - 10.0 * dt)
 
     # Derating curve: linear from 1.0 at zero integral to FATIGUE_LOAD_DERATING
-    # at high integral. Integral of ~500 = 10s at 80°C (50° excess × 10s)
-    stress_fraction = min(1.0, f["heat_integral"] / 500.0)
+    stress_fraction = min(1.0, f["heat_integral"] / FATIGUE_INTEGRAL_MAX)
     f["derating"] = 1.0 - stress_fraction * (1.0 - FATIGUE_LOAD_DERATING)
 
     return f["derating"]
@@ -956,9 +960,19 @@ def poll_loop():
                                     "motor": mid, "name": name, "load": f_load,
                                     "frozen_at": frozen_pos,
                                 }))
+                                # During equalization: accept current position and enter
+                                # resync mode so this joint doesn't block other joints.
+                                # Once the leader moves close to where we are, tracking resumes.
+                                if teleop_equalizing and mid in teleop_eq_targets:
+                                    del teleop_eq_targets[mid]
+                                    teleop_resync[mid] = frozen_pos
+                                    teleop_positions[mid] = frozen_pos
+                                    pending_events.append(("eq_collision_accepted", {
+                                        "motor": mid, "name": name,
+                                        "accepted_at": frozen_pos,
+                                        "original_target": "removed",
+                                    }))
                             goals[mid] = int(teleop_collision[mid])
-                            if teleop_equalizing:
-                                all_equalized = False  # don't end equalization while joints are frozen
                             continue
                         elif mid in teleop_collision:
                             if f_load is not None and f_load < COLLISION_RETREAT_LOAD:
@@ -976,8 +990,6 @@ def poll_loop():
                                 }))
                             else:
                                 goals[mid] = int(teleop_collision[mid])
-                                if teleop_equalizing:
-                                    all_equalized = False
                                 continue
 
                         # ── Resync after collision: hold position until leader approaches ──
@@ -2433,85 +2445,119 @@ def api_move():
     if ramped:
         # P1: No teleport — ramp toward targets in background thread
         def _ramped_move():
-            with state_lock:
-                ph, handler = board["ph"], board["handler"]
-                # Leader has P=0 D=0 (passive arm) — unlock EEPROM, set PID gains so it tracks
-                if is_leader:
-                    for mid in positions:
-                        if mid in board["ids"]:
-                            write_register(ph, handler, mid, LOCK_ADDR, 0, length=1)
-                            time.sleep(0.02)
-                            write_register(ph, handler, mid, P_COEFFICIENT_ADDR, 16, length=1)
-                            write_register(ph, handler, mid, D_COEFFICIENT_ADDR, 32, length=1)
-                            write_register(ph, handler, mid, I_COEFFICIENT_ADDR, 0, length=1)
-                            write_register(ph, handler, mid, LOCK_ADDR, 1, length=1)
-                            time.sleep(0.02)
+          try:
+            # No lock needed — board dict is stable, ph/handler don't change
+            ph, handler = board["ph"], board["handler"]
+            ids = list(board["ids"])
+            for mid in positions:
+                if mid in ids:
+                    board["safety_disabled"][mid] = False
+                    board["stall_counts"][mid]    = 0
+
+            print(f"[ramp] Init: {label} targets={positions}", flush=True)
+            ph.is_using = False
+            if is_leader:
                 for mid in positions:
-                    if mid in board["ids"]:
-                        board["safety_disabled"][mid] = False
-                        board["stall_counts"][mid]    = 0
-                        write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+                    if mid in ids:
+                        ph.is_using = False
+                        write_register(ph, handler, mid, LOCK_ADDR, 0, length=1)
+                        time.sleep(0.02)
+                        write_register(ph, handler, mid, P_COEFFICIENT_ADDR, 16, length=1)
+                        write_register(ph, handler, mid, D_COEFFICIENT_ADDR, 32, length=1)
+                        write_register(ph, handler, mid, I_COEFFICIENT_ADDR, 0, length=1)
+                        write_register(ph, handler, mid, LOCK_ADDR, 1, length=1)
+                        time.sleep(0.02)
+            for mid in positions:
+                if mid in ids:
+                    ph.is_using = False
+                    write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
 
             max_delta = TELEOP_MAX_DELTA  # counts per cycle
             remaining = dict(positions)   # {mid: final_goal}
             collided = {}  # {mid: load} — joints stopped due to collision
 
-            for _ in range(200):  # max 200 cycles = 10s at 20Hz
+            print(f"[ramp] Starting: {label} targets={positions}")
+            for cycle in range(200):  # max 200 cycles = 10s at 20Hz
                 if not remaining:
                     break
                 done = []
-                with state_lock:
-                    ph, handler = board["ph"], board["handler"]
-                    for mid, goal in remaining.items():
-                        # P5: collision detection — if load > threshold, stop immediately
-                        load = board["loads"].get(mid)
-                        if load is not None and load > COLLISION_LOAD_THRESHOLD:
-                            cur = board["positions"].get(mid, goal)
-                            write_register(ph, handler, mid, GOAL_POSITION_ADDR, cur, length=2)
-                            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
-                            collided[mid] = load
-                            done.append(mid)
-                            push_event("collision_detected", {
-                                "label": label, "motor": mid,
-                                "name": ID_NAMES.get(mid, str(mid)),
-                                "load": load, "position": cur,
-                            })
-                            continue
+                # Read from board dict directly — poll loop updates it at 20Hz
+                # No lock needed: we read ints (atomic on CPython/GIL)
+                snap_pos = {mid: board["positions"].get(mid) for mid in remaining}
+                snap_load = {mid: board["loads"].get(mid) for mid in remaining}
 
-                        # P2: read actual position each cycle (poll loop updates at 20Hz)
-                        current = board["positions"].get(mid, goal)
-                        delta = goal - current
-                        if abs(delta) <= 2:  # deadband
-                            done.append(mid)
-                            continue
-                        step = max(-max_delta, min(max_delta, delta))
-                        next_pos = current + step
-                        write_register(ph, handler, mid, GOAL_POSITION_ADDR, next_pos, length=2)
+                # Compute writes outside lock
+                writes = {}  # mid -> next_pos
+                for mid, goal in remaining.items():
+                    # P5: collision detection — fatigue-adjusted threshold
+                    load = snap_load.get(mid)
+                    col_thresh = _get_effective_collision_threshold(mid)
+                    if load is not None and load > col_thresh:
+                        cur = snap_pos.get(mid, goal)
+                        collided[mid] = load
+                        done.append(mid)
+                        print(f"[ramp] COLLISION {ID_NAMES.get(mid,'?')}: load={load} > thresh={col_thresh}, pos={cur}")
+                        continue
+
+                    # P2: read actual position each cycle (poll loop updates at 20Hz)
+                    current = snap_pos.get(mid, goal)
+                    if current is None:
+                        continue
+                    delta = goal - current
+                    if abs(delta) <= 2:  # deadband
+                        done.append(mid)
+                        continue
+                    step = max(-max_delta, min(max_delta, delta))
+                    next_pos = current + step
+                    writes[mid] = next_pos
+
+                # Execute writes outside lock — no contention with poll loop
+                ph.is_using = False
+                for mid, next_pos in writes.items():
+                    write_register(ph, handler, mid, GOAL_POSITION_ADDR, next_pos, length=2)
+
+                # Handle collisions
+                for mid in [m for m in done if m in collided]:
+                    cur = snap_pos.get(mid, 0)
+                    write_register(ph, handler, mid, GOAL_POSITION_ADDR, cur, length=2)
+                    write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+
                 for mid in done:
-                    del remaining[mid]
+                    remaining.pop(mid, None)
+
+                # Log progress every 20 cycles (~1s)
+                if cycle % 20 == 0 and writes:
+                    parts = [f"{ID_NAMES.get(m,'?')}:{snap_pos.get(m,'?')}->{writes[m]}" for m in writes]
+                    print(f"[ramp] cycle={cycle} {' '.join(parts)}")
+
                 time.sleep(PING_INTERVAL)
 
-            # Disable torque after settling
+            # Disable torque after settling — writes outside lock
             time.sleep(0.5)
-            with state_lock:
-                ph, handler = board["ph"], board["handler"]
+            print(f"[ramp] Done. Disabling torque.")
+            ph.is_using = False
+            for mid in positions:
+                if mid in ids:
+                    ph.is_using = False
+                    write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+            if is_leader:
                 for mid in positions:
-                    if mid in board["ids"]:
-                        write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
-                # Restore leader PID gains to passive (P=0, D=0)
-                if is_leader:
-                    for mid in positions:
-                        if mid in board["ids"]:
-                            write_register(ph, handler, mid, LOCK_ADDR, 0, length=1)
-                            time.sleep(0.02)
-                            write_register(ph, handler, mid, P_COEFFICIENT_ADDR, 0, length=1)
-                            write_register(ph, handler, mid, D_COEFFICIENT_ADDR, 0, length=1)
-                            write_register(ph, handler, mid, I_COEFFICIENT_ADDR, 0, length=1)
-                            write_register(ph, handler, mid, LOCK_ADDR, 1, length=1)
+                    if mid in ids:
+                        ph.is_using = False
+                        write_register(ph, handler, mid, LOCK_ADDR, 0, length=1)
+                        time.sleep(0.02)
+                        write_register(ph, handler, mid, P_COEFFICIENT_ADDR, 0, length=1)
+                        write_register(ph, handler, mid, D_COEFFICIENT_ADDR, 0, length=1)
+                        write_register(ph, handler, mid, I_COEFFICIENT_ADDR, 0, length=1)
+                        write_register(ph, handler, mid, LOCK_ADDR, 1, length=1)
             result = {"label": label, "positions": positions, "ramped": True}
             if collided:
                 result["collisions"] = {ID_NAMES.get(k, str(k)): v for k, v in collided.items()}
             push_event("move_complete", result)
+          except Exception as e:
+            import traceback
+            print(f"[ramp] EXCEPTION: {e}")
+            traceback.print_exc()
 
         threading.Thread(target=_ramped_move, daemon=True).start()
         push_event("move_start", {"label": label, "positions": positions, "ramped": True})
@@ -2680,14 +2726,21 @@ def api_teleop_start():
                 # P9: apply workspace limits to equalization targets too
                 clamped = _apply_workspace_limits(clamped, name, "follower")
                 gap = abs(f_raw - clamped) if f_raw is not None else 0
-                eq_targets[mid] = clamped
-                if gap > TELEOP_LARGE_GAP:
-                    large_gaps[name] = int(gap)
                 startup_state[name] = {
                     "f_pos": f_raw, "l_pos": l_raw,
                     "target": int(target), "clamped": int(clamped),
                     "gap": int(gap), "range": [r_min, r_max],
                 }
+                if gap > TELEOP_LARGE_GAP:
+                    large_gaps[name] = int(gap)
+                    # Gap too large to equalize safely — accept current position
+                    # and enter resync mode. Joint will start tracking once leader
+                    # moves close to follower's actual position.
+                    teleop_resync[mid] = f_raw
+                    teleop_positions[mid] = f_raw
+                    startup_state[name]["mode"] = "resync"
+                else:
+                    eq_targets[mid] = clamped
 
         teleop_eq_targets  = eq_targets
         teleop_equalizing  = True

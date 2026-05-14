@@ -270,6 +270,7 @@
 
 <div class="tabs">
   <button class="tab active" onclick="switchTab('status')">Status</button>
+  <button class="tab" onclick="switchTab('chat')">Chat</button>
   <button class="tab" onclick="switchTab('model')">3D Model</button>
   <button class="tab" onclick="switchTab('camera')">Camera</button>
   <button class="tab" onclick="switchTab('ports')">Ports</button>
@@ -292,19 +293,46 @@
 </div>
 
 <!-- ============================================================ -->
+<!-- CHAT TAB                                                      -->
+<!-- ============================================================ -->
+<div id="panel-chat" class="panel">
+  <iframe src="http://localhost:8888"
+          style="width:100%;height:600px;border:none;border-radius:6px;background:#111"
+          id="chat-iframe">
+  </iframe>
+</div>
+
+<!-- ============================================================ -->
 <!-- 3D MODEL TAB                                                  -->
 <!-- ============================================================ -->
 <div id="panel-model" class="panel">
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
     <label style="font-size:12px;color:#aaa">
       <input type="checkbox" id="model-show-leader" checked onchange="modelSetShowLeader(this.checked)"> Show leader
     </label>
     <label style="font-size:12px;color:#aaa;margin-left:12px">
       <input type="checkbox" id="model-show-follower" checked onchange="modelSetShowFollower(this.checked)"> Show follower
     </label>
+    <label style="font-size:12px;color:#aaa;margin-left:12px">
+      <input type="checkbox" id="model-show-labels" checked onchange="modelSetShowLabels(this.checked)"> Labels
+    </label>
+    <label style="font-size:12px;color:#fbbf24;margin-left:12px;font-weight:600">
+      <input type="checkbox" id="model-learn-mode" onchange="modelSetLearnMode(this.checked)"> Learning Mode
+    </label>
     <span id="model-status" style="margin-left:auto;font-size:12px;color:#555"></span>
   </div>
-  <canvas id="model-canvas" style="width:100%;height:480px;border-radius:6px;background:#0d0d0d;display:block"></canvas>
+  <div style="display:flex;gap:12px">
+    <canvas id="model-canvas" style="flex:1;height:520px;border-radius:6px;background:#0d0d0d;display:block"></canvas>
+    <div id="learn-panel" style="width:220px;display:none;flex-shrink:0">
+      <div style="font-size:13px;font-weight:600;color:#fbbf24;margin-bottom:8px">Learning Mode</div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px">Move a joint on either arm to learn its name and function.</div>
+      <div id="learn-active-joint" style="font-size:18px;font-weight:700;color:#fff;margin-bottom:4px">--</div>
+      <div id="learn-joint-desc" style="font-size:12px;color:#aaa;line-height:1.5;margin-bottom:12px">Waiting for movement...</div>
+      <div id="learn-joint-axis" style="font-size:11px;color:#666;margin-bottom:12px"></div>
+      <div style="font-size:11px;font-weight:600;color:#555;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">All joints</div>
+      <div id="learn-joint-list"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ============================================================ -->
@@ -373,7 +401,7 @@ let lastCal       = { active: false, ranges: {} };
 // ---------------------------------------------------------------- //
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((t, i) => {
-    t.classList.toggle("active", ["status","model","camera","ports","calibrate"][i] === name);
+    t.classList.toggle("active", ["status","chat","model","camera","ports","calibrate"][i] === name);
   });
   document.querySelectorAll(".panel").forEach(p => {
     p.classList.toggle("active", p.id === "panel-" + name);
@@ -901,30 +929,45 @@ async function notifAction(id, trigger) {
 // 3D ARM MODEL                                                      //
 // ================================================================ //
 (function() {
+  // Full calibration with homing_offset and drive_mode for correct angle mapping.
+  // raw_to_cal: drive_mode==0 → raw - offset, drive_mode==1 → offset - raw
+  // Both arms normalize through calibrated space so they show matching physical angles.
   const CAL = {
     follower: {
-      shoulder_pan:  { min: 917,  max: 3660 },
-      shoulder_lift: { min: 659,  max: 3110 },
-      elbow_flex:    { min: 15,   max: 4071 },
-      wrist_flex:    { min: 945,  max: 3339 },
-      wrist_roll:    { min: 6,    max: 4069 },
-      gripper:       { min: 1323, max: 2862 },
+      shoulder_pan:  { min: 917,  max: 3660, offset: -98,   drive: 0 },
+      shoulder_lift: { min: 659,  max: 3110, offset: 1545,  drive: 0 },
+      elbow_flex:    { min: 15,   max: 4071, offset: -156,  drive: 0 },
+      wrist_flex:    { min: 945,  max: 3339, offset: -1895, drive: 0 },
+      wrist_roll:    { min: 6,    max: 4069, offset: 1113,  drive: 0 },
+      gripper:       { min: 1323, max: 2862, offset: -800,  drive: 0 },
     },
     leader: {
-      shoulder_pan:  { min: 744,  max: 3292 },
-      shoulder_lift: { min: 930,  max: 3369 },
-      elbow_flex:    { min: 1858, max: 4064 },
-      wrist_flex:    { min: 882,  max: 3227 },
-      wrist_roll:    { min: 2,    max: 4065 },
-      gripper:       { min: 1846, max: 3029 },
+      shoulder_pan:  { min: 744,  max: 3292, offset: 1142,  drive: 0 },
+      shoulder_lift: { min: 930,  max: 3369, offset: -1431, drive: 0 },
+      elbow_flex:    { min: 1858, max: 4064, offset: 837,   drive: 0 },
+      wrist_flex:    { min: 882,  max: 3227, offset: 1297,  drive: 0 },
+      wrist_roll:    { min: 2,    max: 4080, offset: 1841,  drive: 0 },
+      gripper:       { min: 1846, max: 3029, offset: 535,   drive: 0 },
     }
   };
 
-  // Map raw servo count to [-1, 1]
+  // Convert raw encoder to calibrated value (applying homing offset + drive mode)
+  function rawToCal(raw, cal) {
+    return cal.drive === 0 ? raw - cal.offset : cal.offset - raw;
+  }
+
+  // Map raw servo count to [-1, 1] through calibrated space.
+  // Both arms go through the same calibrated-space normalization so the 3D model
+  // shows matching physical angles regardless of different homing offsets.
   function norm(raw, cal) {
-    const span = cal.max - cal.min;
+    const calVal  = rawToCal(raw, cal);
+    const calMin  = rawToCal(cal.min, cal);
+    const calMax  = rawToCal(cal.max, cal);
+    const lo = Math.min(calMin, calMax);
+    const hi = Math.max(calMin, calMax);
+    const span = hi - lo;
     if (span === 0) return 0;
-    return ((raw - cal.min) / span) * 2 - 1;
+    return ((calVal - lo) / span) * 2 - 1;
   }
 
   let scene, camera, renderer, animId;
@@ -958,112 +1001,379 @@ async function notifAction(id, trigger) {
     return new THREE.Mesh(g, makeMaterial(color, opacity));
   }
 
+  // Joint descriptions for learning mode
+  const JOINT_INFO = {
+    shoulder_pan:  { label: "Shoulder Pan",  axis: "Z-axis (vertical)", desc: "Rotates the entire arm left and right, like turning to look sideways. This is the base rotation. Motor 1." },
+    shoulder_lift: { label: "Shoulder Lift",  axis: "Z-axis (horizontal)", desc: "Raises or lowers the upper arm, like lifting your arm up from your side. Controls the arm's overall height. Motor 2." },
+    elbow_flex:    { label: "Elbow Flex",    axis: "Z-axis (horizontal)", desc: "Bends the forearm up or down, like bending your elbow. Extends or retracts the arm's reach. Motor 3." },
+    wrist_flex:    { label: "Wrist Flex",    axis: "Z-axis (horizontal)", desc: "Tilts the hand up or down, like nodding your wrist. Controls the approach angle to objects. Motor 4." },
+    wrist_roll:    { label: "Wrist Roll",    axis: "Y-axis (along arm)", desc: "Rotates the hand around the forearm axis, like turning a doorknob. Controls gripper orientation. Motor 5." },
+    gripper:       { label: "Gripper",       axis: "Revolute (open/close)", desc: "Opens and closes the jaw to grasp objects. One fixed jaw, one moving jaw. Motor 6." },
+  };
+
+  // ---- SO-101 accurate dimensions from URDF (meters) ----
+  // Base height: 0.0624m, upper arm: 0.0896m, forearm: 0.1349m, wrist: 0.0611m
+  // Servo body: ~40x20x40mm, gold 3D-printed brackets, dark gray servos
+  const SO = {
+    baseW: 0.07, baseD: 0.07, baseH: 0.0624,   // rectangular base platform
+    servoW: 0.024, servoH: 0.04, servoD: 0.032, // servo motor body
+    bracketT: 0.004,                              // bracket wall thickness
+    upperArm: 0.0896,                             // shoulder_lift to elbow_flex
+    forearm: 0.1349,                              // elbow_flex to wrist_flex
+    wristLen: 0.0611,                             // wrist_flex to gripper tip
+    jawLen: 0.045, jawW: 0.008, jawGap: 0.025,   // gripper jaw dimensions
+  };
+
   function buildArm(isLeader) {
-    const lc = isLeader ? COLORS.leader : COLORS.link;
-    const jc = isLeader ? COLORS.leaderJoint : COLORS.joint;
+    const GOLD    = isLeader ? 0xc084fc : 0xf0c820;  // bracket color (purple for leader)
+    const SERVO   = isLeader ? 0x7c3aed : 0x1a1a1a;  // servo body color
+    const JOINT_C = isLeader ? 0xc084fc : 0x38bdf8;  // joint accent
+    const GRIP_C  = isLeader ? 0xc084fc : 0x22d3ee;  // gripper
     const op = isLeader ? 0.55 : 1.0;
 
     const root = new THREE.Group();
 
-    // Base
-    const base = makeCylinder(0.12, 0.15, 0.08, COLORS.base, op);
-    base.position.y = 0.04;
-    root.add(base);
+    // ── BASE: rectangular platform with mounting plate ──
+    const basePlate = makeBox(SO.baseW, SO.baseH * 0.35, SO.baseD, GOLD, op);
+    basePlate.position.y = SO.baseH * 0.175;
+    root.add(basePlate);
 
-    // Shoulder pan pivot (rotates around Y)
+    // Base motor housing (shoulder pan servo sits here)
+    const baseMotor = makeBox(SO.servoW, SO.servoH, SO.servoD, SERVO, op);
+    baseMotor.position.y = SO.baseH * 0.35 + SO.servoH * 0.5;
+    root.add(baseMotor);
+
+    // Base top bracket
+    const baseTop = makeBox(SO.baseW * 0.6, SO.bracketT * 2, SO.baseD * 0.6, GOLD, op);
+    baseTop.position.y = SO.baseH;
+    root.add(baseTop);
+
+    // ── SHOULDER PAN pivot (rotates around Y) ──
     const panPivot = new THREE.Group();
-    panPivot.position.y = 0.08;
+    panPivot.position.y = SO.baseH;
     root.add(panPivot);
 
-    const panJoint = makeSphere(0.06, jc, op);
-    panPivot.add(panJoint);
+    const panAnchor = new THREE.Object3D();
+    panAnchor.position.y = 0.01;
+    panPivot.add(panAnchor);
 
-    // Shoulder lift pivot (rotates around Z)
+    // Shoulder rotation bracket (L-shaped bracket that holds shoulder lift servo)
+    const shoulderBracket = makeBox(0.04, 0.035, 0.04, GOLD, op);
+    shoulderBracket.position.y = 0.018;
+    panPivot.add(shoulderBracket);
+
+    // Shoulder lift servo (mounted sideways in the bracket)
+    const shoulderServo = makeBox(SO.servoD, SO.servoW, SO.servoH, SERVO, op);
+    shoulderServo.position.set(0, 0.042, 0);
+    panPivot.add(shoulderServo);
+
+    // ── SHOULDER LIFT pivot (rotates around Z) ──
     const liftPivot = new THREE.Group();
-    liftPivot.position.y = 0.02;
+    liftPivot.position.y = 0.054;
     panPivot.add(liftPivot);
 
-    const upperArm = makeBox(0.05, 0.22, 0.05, lc, op);
-    upperArm.position.y = 0.11;
-    liftPivot.add(upperArm);
+    const liftAnchor = new THREE.Object3D();
+    liftAnchor.position.y = 0.02;
+    liftPivot.add(liftAnchor);
 
-    const elbowJoint = makeSphere(0.055, jc, op);
-    elbowJoint.position.y = 0.22;
-    liftPivot.add(elbowJoint);
+    // Joint indicator
+    const liftJoint = makeCylinder(0.014, 0.014, 0.035, JOINT_C, op);
+    liftJoint.rotation.x = Math.PI / 2;
+    liftPivot.add(liftJoint);
 
-    // Elbow flex pivot
+    // Upper arm link (bracket-style, not a plain box)
+    const upperArmMain = makeBox(0.028, SO.upperArm, 0.028, GOLD, op);
+    upperArmMain.position.y = SO.upperArm * 0.5;
+    liftPivot.add(upperArmMain);
+
+    // Upper arm side rails (the distinctive SO-101 look)
+    const railL = makeBox(SO.bracketT, SO.upperArm * 0.8, 0.022, GOLD, op);
+    railL.position.set(-0.016, SO.upperArm * 0.45, 0);
+    liftPivot.add(railL);
+    const railR = makeBox(SO.bracketT, SO.upperArm * 0.8, 0.022, GOLD, op);
+    railR.position.set(0.016, SO.upperArm * 0.45, 0);
+    liftPivot.add(railR);
+
+    // Elbow servo (at top of upper arm)
+    const elbowServo = makeBox(SO.servoD, SO.servoW, SO.servoH, SERVO, op);
+    elbowServo.position.set(0, SO.upperArm - 0.01, 0);
+    liftPivot.add(elbowServo);
+
+    // ── ELBOW FLEX pivot ──
     const elbowPivot = new THREE.Group();
-    elbowPivot.position.y = 0.22;
+    elbowPivot.position.y = SO.upperArm;
     liftPivot.add(elbowPivot);
 
-    const forearm = makeBox(0.045, 0.20, 0.045, lc, op);
-    forearm.position.y = 0.10;
-    elbowPivot.add(forearm);
+    const elbowAnchor = new THREE.Object3D();
+    elbowAnchor.position.y = 0.0;
+    elbowPivot.add(elbowAnchor);
 
-    const wristJoint = makeSphere(0.048, jc, op);
-    wristJoint.position.y = 0.20;
-    elbowPivot.add(wristJoint);
+    // Elbow joint indicator
+    const elbowJointVis = makeCylinder(0.013, 0.013, 0.032, JOINT_C, op);
+    elbowJointVis.rotation.x = Math.PI / 2;
+    elbowPivot.add(elbowJointVis);
 
-    // Wrist flex pivot
+    // Forearm link (longer than upper arm per URDF: 134.9mm)
+    const forearmMain = makeBox(0.025, SO.forearm, 0.025, GOLD, op);
+    forearmMain.position.y = SO.forearm * 0.5;
+    elbowPivot.add(forearmMain);
+
+    // Forearm side rails
+    const fRailL = makeBox(SO.bracketT, SO.forearm * 0.75, 0.020, GOLD, op);
+    fRailL.position.set(-0.015, SO.forearm * 0.4, 0);
+    elbowPivot.add(fRailL);
+    const fRailR = makeBox(SO.bracketT, SO.forearm * 0.75, 0.020, GOLD, op);
+    fRailR.position.set(0.015, SO.forearm * 0.4, 0);
+    elbowPivot.add(fRailR);
+
+    // Wrist motor holder bracket at end of forearm
+    const wristHolder = makeBox(0.032, 0.025, 0.032, GOLD, op);
+    wristHolder.position.y = SO.forearm - 0.012;
+    elbowPivot.add(wristHolder);
+
+    // Wrist flex servo
+    const wristServo = makeBox(SO.servoW, SO.servoH * 0.8, SO.servoD * 0.8, SERVO, op);
+    wristServo.position.set(0, SO.forearm - 0.01, 0);
+    elbowPivot.add(wristServo);
+
+    // ── WRIST FLEX pivot ──
     const wristFlexPivot = new THREE.Group();
-    wristFlexPivot.position.y = 0.20;
+    wristFlexPivot.position.y = SO.forearm;
     elbowPivot.add(wristFlexPivot);
 
-    const wristSeg = makeBox(0.04, 0.10, 0.04, lc, op);
-    wristSeg.position.y = 0.05;
-    wristFlexPivot.add(wristSeg);
+    const wristFlexAnchor = new THREE.Object3D();
+    wristFlexAnchor.position.y = 0.0;
+    wristFlexPivot.add(wristFlexAnchor);
 
-    // Wrist roll pivot (rotates around Y = arm axis)
+    // Wrist flex joint indicator
+    const wristFlexJoint = makeCylinder(0.011, 0.011, 0.028, JOINT_C, op);
+    wristFlexJoint.rotation.x = Math.PI / 2;
+    wristFlexPivot.add(wristFlexJoint);
+
+    // Wrist roll pitch bracket
+    const wristBracket = makeBox(0.024, 0.035, 0.024, GOLD, op);
+    wristBracket.position.y = 0.018;
+    wristFlexPivot.add(wristBracket);
+
+    // Wrist roll servo (small, at end)
+    const rollServo = makeBox(SO.servoW * 0.8, SO.servoH * 0.6, SO.servoD * 0.7, SERVO, op);
+    rollServo.position.y = 0.038;
+    wristFlexPivot.add(rollServo);
+
+    // ── WRIST ROLL pivot (rotates around Y = arm axis) ──
     const wristRollPivot = new THREE.Group();
-    wristRollPivot.position.y = 0.10;
+    wristRollPivot.position.y = SO.wristLen * 0.7;
     wristFlexPivot.add(wristRollPivot);
 
-    const wristDisc = makeCylinder(0.035, 0.035, 0.03, jc, op);
-    wristDisc.rotation.x = Math.PI / 2;
+    const wristRollAnchor = new THREE.Object3D();
+    wristRollAnchor.position.y = 0.0;
+    wristRollPivot.add(wristRollAnchor);
+
+    // Wrist roll disc
+    const wristDisc = makeCylinder(0.016, 0.016, 0.012, JOINT_C, op);
     wristRollPivot.add(wristDisc);
 
-    // Gripper
-    const gripperBase = makeBox(0.04, 0.04, 0.04, lc, op);
-    gripperBase.position.y = 0.02;
-    wristRollPivot.add(gripperBase);
+    // ── GRIPPER ──
+    // Fixed jaw base
+    const gripBase = makeBox(0.030, 0.015, 0.025, GOLD, op);
+    gripBase.position.y = 0.012;
+    wristRollPivot.add(gripBase);
 
-    const fingerL = makeBox(0.012, 0.07, 0.012, COLORS.gripper, op);
-    fingerL.position.set(-0.02, 0.055, 0);
-    wristRollPivot.add(fingerL);
+    // Fixed jaw (one side)
+    const fixedJaw = makeBox(SO.jawW, SO.jawLen, 0.012, GRIP_C, op);
+    fixedJaw.position.set(-SO.jawGap * 0.5, SO.jawLen * 0.5 + 0.018, 0);
+    wristRollPivot.add(fixedJaw);
 
-    const fingerR = makeBox(0.012, 0.07, 0.012, COLORS.gripper, op);
-    fingerR.position.set(0.02, 0.055, 0);
-    wristRollPivot.add(fingerR);
+    // Moving jaw (other side — this opens/closes)
+    const movingJaw = makeBox(SO.jawW, SO.jawLen, 0.012, GRIP_C, op);
+    movingJaw.position.set(SO.jawGap * 0.5, SO.jawLen * 0.5 + 0.018, 0);
+    wristRollPivot.add(movingJaw);
+
+    // Jaw tips (slightly wider for grip surface)
+    const tipL = makeBox(SO.jawW + 0.004, 0.006, 0.016, GRIP_C, op);
+    tipL.position.set(-SO.jawGap * 0.5, SO.jawLen + 0.018, 0);
+    wristRollPivot.add(tipL);
+    const tipR = makeBox(SO.jawW + 0.004, 0.006, 0.016, GRIP_C, op);
+    tipR.position.set(SO.jawGap * 0.5, SO.jawLen + 0.018, 0);
+    wristRollPivot.add(tipR);
+
+    // Gripper label anchor
+    const gripperAnchor = new THREE.Object3D();
+    gripperAnchor.position.y = SO.jawLen + 0.025;
+    wristRollPivot.add(gripperAnchor);
 
     return {
       root, panPivot, liftPivot, elbowPivot,
-      wristFlexPivot, wristRollPivot, fingerL, fingerR
+      wristFlexPivot, wristRollPivot,
+      fingerL: fixedJaw, fingerR: movingJaw,
+      anchors: {
+        shoulder_pan: panAnchor,
+        shoulder_lift: liftAnchor,
+        elbow_flex: elbowAnchor,
+        wrist_flex: wristFlexAnchor,
+        wrist_roll: wristRollAnchor,
+        gripper: gripperAnchor,
+      }
     };
   }
 
   function updateArm(arm, positions, calSet) {
     const p = positions;
     const c = calSet;
+    // URDF joint limits: pan +-1.92rad (110deg), lift +-1.745rad (100deg),
+    // elbow +-1.69rad (97deg), wrist_flex +-1.658rad (95deg), wrist_roll -2.74..+2.84rad
 
     if (p.shoulder_pan !== undefined && c.shoulder_pan) {
-      arm.panPivot.rotation.y = norm(p.shoulder_pan, c.shoulder_pan) * -Math.PI * 0.75;
+      arm.panPivot.rotation.y = norm(p.shoulder_pan, c.shoulder_pan) * 1.92;
     }
     if (p.shoulder_lift !== undefined && c.shoulder_lift) {
-      arm.liftPivot.rotation.z = norm(p.shoulder_lift, c.shoulder_lift) * Math.PI * 0.45;
+      arm.liftPivot.rotation.z = norm(p.shoulder_lift, c.shoulder_lift) * 1.745;
     }
     if (p.elbow_flex !== undefined && c.elbow_flex) {
-      arm.elbowPivot.rotation.z = norm(p.elbow_flex, c.elbow_flex) * -Math.PI * 0.5;
+      arm.elbowPivot.rotation.z = norm(p.elbow_flex, c.elbow_flex) * -1.69;
     }
     if (p.wrist_flex !== undefined && c.wrist_flex) {
-      arm.wristFlexPivot.rotation.z = norm(p.wrist_flex, c.wrist_flex) * Math.PI * 0.45;
+      arm.wristFlexPivot.rotation.z = norm(p.wrist_flex, c.wrist_flex) * 1.658;
     }
     if (p.wrist_roll !== undefined && c.wrist_roll) {
-      arm.wristRollPivot.rotation.y = norm(p.wrist_roll, c.wrist_roll) * Math.PI;
+      arm.wristRollPivot.rotation.y = norm(p.wrist_roll, c.wrist_roll) * 2.79;
     }
     if (p.gripper !== undefined && c.gripper) {
+      // SO-101: one fixed jaw, one moving jaw. Moving jaw swings open.
       const g = (norm(p.gripper, c.gripper) + 1) / 2; // 0=closed, 1=open
-      arm.fingerL.position.x = -0.012 - g * 0.022;
-      arm.fingerR.position.x =  0.012 + g * 0.022;
+      arm.fingerL.position.x = -SO.jawGap * 0.5;  // fixed jaw stays put
+      arm.fingerR.position.x = SO.jawGap * 0.5 + g * 0.018;  // moving jaw opens
+    }
+  }
+
+  // ---- HTML overlay labels that track 3D joint positions ----
+  let showLabels = true;
+  let learnMode = false;
+  let labelElements = {};  // { "follower_shoulder_pan": {el, anchor}, ... }
+  let prevLearnPositions = {};  // for detecting movement
+  let activeLearnJoint = null;
+  let learnHighlightMat = null;  // shared highlight material
+  let originalMaterials = {};  // store originals for un-highlight
+
+  function createLabelOverlay(canvas) {
+    // Container div overlaid on the canvas
+    const overlay = document.createElement("div");
+    overlay.id = "label-overlay";
+    overlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden";
+    canvas.parentElement.style.position = "relative";
+    canvas.parentElement.insertBefore(overlay, canvas.nextSibling);
+    return overlay;
+  }
+
+  function createLabel(overlay, name, role) {
+    const el = document.createElement("div");
+    const info = JOINT_INFO[name];
+    const isLeader = role === "leader";
+    el.style.cssText = `position:absolute;font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;
+      white-space:nowrap;transform:translate(-50%,-100%);pointer-events:none;transition:opacity 0.15s;
+      background:${isLeader ? 'rgba(168,85,247,0.85)' : 'rgba(14,165,233,0.85)'};color:#fff;
+      border:1px solid ${isLeader ? 'rgba(192,132,252,0.5)' : 'rgba(56,189,248,0.5)'};
+      text-shadow:0 1px 2px rgba(0,0,0,0.5)`;
+    el.textContent = info ? info.label : name;
+    overlay.appendChild(el);
+    return el;
+  }
+
+  function updateLabelPositions(canvasEl, cam, arms) {
+    const rect = canvasEl.getBoundingClientRect();
+    const vec = new THREE.Vector3();
+
+    for (const key of Object.keys(labelElements)) {
+      const { el, anchor } = labelElements[key];
+      if (!showLabels || !anchor.parent?.visible) {
+        el.style.display = "none";
+        continue;
+      }
+      anchor.getWorldPosition(vec);
+      vec.project(cam);
+      const x = (vec.x * 0.5 + 0.5) * rect.width;
+      const y = (-vec.y * 0.5 + 0.5) * rect.height;
+      // Hide if behind camera
+      if (vec.z > 1) { el.style.display = "none"; continue; }
+      el.style.display = "";
+      el.style.left = x + "px";
+      el.style.top  = y + "px";
+    }
+  }
+
+  // ---- Learning mode: detect which joint is moving ----
+  function updateLearnMode() {
+    if (!learnMode) return;
+    const MOVE_THRESH = 15;  // raw counts to detect movement
+    let biggestDelta = 0;
+    let biggestJoint = null;
+    let biggestRole = null;
+
+    for (const role of ["follower", "leader"]) {
+      for (const name of Object.keys(JOINT_INFO)) {
+        const cur = currentPositions[role]?.[name];
+        const prev = prevLearnPositions[role + "_" + name];
+        if (cur !== undefined && prev !== undefined) {
+          const delta = Math.abs(cur - prev);
+          if (delta > MOVE_THRESH && delta > biggestDelta) {
+            biggestDelta = delta;
+            biggestJoint = name;
+            biggestRole = role;
+          }
+        }
+        if (cur !== undefined) prevLearnPositions[role + "_" + name] = cur;
+      }
+    }
+
+    if (biggestJoint && biggestJoint !== activeLearnJoint) {
+      activeLearnJoint = biggestJoint;
+      const info = JOINT_INFO[biggestJoint];
+      document.getElementById("learn-active-joint").textContent = info.label;
+      document.getElementById("learn-active-joint").style.color =
+        biggestRole === "leader" ? "#c084fc" : "#38bdf8";
+      document.getElementById("learn-joint-desc").textContent = info.desc;
+      document.getElementById("learn-joint-axis").textContent = "Axis: " + info.axis +
+        " | Source: " + biggestRole;
+
+      // Highlight in joint list
+      document.querySelectorAll(".learn-joint-item").forEach(el => {
+        el.style.background = el.dataset.joint === biggestJoint ? "#2a2a2a" : "transparent";
+        el.style.color = el.dataset.joint === biggestJoint ? "#fff" : "#666";
+      });
+
+      // Pulse the label
+      for (const key of Object.keys(labelElements)) {
+        const { el } = labelElements[key];
+        if (key.endsWith("_" + biggestJoint)) {
+          el.style.background = "rgba(251,191,36,0.9)";
+          el.style.color = "#000";
+          el.style.fontSize = "12px";
+        } else {
+          const isLdr = key.startsWith("leader");
+          el.style.background = isLdr ? "rgba(168,85,247,0.85)" : "rgba(14,165,233,0.85)";
+          el.style.color = "#fff";
+          el.style.fontSize = "10px";
+        }
+      }
+    }
+  }
+
+  function buildLearnPanel() {
+    const list = document.getElementById("learn-joint-list");
+    if (!list) return;
+    list.innerHTML = "";
+    for (const [name, info] of Object.entries(JOINT_INFO)) {
+      const item = document.createElement("div");
+      item.className = "learn-joint-item";
+      item.dataset.joint = name;
+      item.style.cssText = "padding:4px 8px;border-radius:4px;font-size:11px;color:#666;margin-bottom:2px;cursor:default;transition:all 0.15s";
+      item.textContent = info.label;
+      item.addEventListener("mouseenter", () => {
+        document.getElementById("learn-active-joint").textContent = info.label;
+        document.getElementById("learn-joint-desc").textContent = info.desc;
+        document.getElementById("learn-joint-axis").textContent = "Axis: " + info.axis;
+      });
+      list.appendChild(item);
     }
   }
 
@@ -1106,10 +1416,27 @@ async function notifAction(id, trigger) {
     leaderArm.root.position.z = -0.1;
     scene.add(leaderArm.root);
 
+    // Create HTML label overlay
+    const overlay = createLabelOverlay(canvas);
+    const jointNames = Object.keys(JOINT_INFO);
+    for (const role of ["follower", "leader"]) {
+      const arm = role === "follower" ? followerArm : leaderArm;
+      for (const name of jointNames) {
+        const key = role + "_" + name;
+        labelElements[key] = {
+          el: createLabel(overlay, name, role),
+          anchor: arm.anchors[name],
+        };
+      }
+    }
+
+    // Build learning mode panel content
+    buildLearnPanel();
+
     // Orbit controls (manual)
     let dragging = false, lastX = 0, lastY = 0;
     let theta = 0.8, phi = 0.6, radius = 1.4;
-    function updateCamera() {
+    function updateCameraPos() {
       camera.position.set(
         radius * Math.sin(theta) * Math.cos(phi),
         radius * Math.sin(phi) + 0.2,
@@ -1124,14 +1451,14 @@ async function notifAction(id, trigger) {
       theta -= (e.clientX - lastX) * 0.01;
       phi    = Math.max(0.05, Math.min(1.4, phi + (e.clientY - lastY) * 0.01));
       lastX = e.clientX; lastY = e.clientY;
-      updateCamera();
+      updateCameraPos();
     });
     canvas.addEventListener("wheel", e => {
       radius = Math.max(0.5, Math.min(3, radius + e.deltaY * 0.002));
-      updateCamera();
+      updateCameraPos();
       e.preventDefault();
     }, { passive: false });
-    updateCamera();
+    updateCameraPos();
 
     // Handle resize
     new ResizeObserver(() => {
@@ -1141,6 +1468,7 @@ async function notifAction(id, trigger) {
       camera.updateProjectionMatrix();
     }).observe(canvas);
 
+    let learnCounter = 0;
     function animate() {
       animId = requestAnimationFrame(animate);
       updateArm(followerArm, currentPositions.follower, CAL.follower);
@@ -1148,6 +1476,9 @@ async function notifAction(id, trigger) {
       followerArm.root.visible = showFollower;
       leaderArm.root.visible   = showLeader;
       renderer.render(scene, camera);
+      updateLabelPositions(canvas, camera, { follower: followerArm, leader: leaderArm });
+      // Learning mode detection at ~5Hz (every 12 frames at 60fps)
+      if (++learnCounter % 12 === 0) updateLearnMode();
     }
     animate();
 
@@ -1167,6 +1498,32 @@ async function notifAction(id, trigger) {
 
   window.modelSetShowLeader   = v => { showLeader = v; };
   window.modelSetShowFollower = v => { showFollower = v; };
+  window.modelSetShowLabels   = v => { showLabels = v; };
+  window.modelSetLearnMode    = v => {
+    learnMode = v;
+    document.getElementById("learn-panel").style.display = v ? "" : "none";
+    if (v) {
+      // Seed prev positions to avoid false triggers
+      for (const role of ["follower", "leader"]) {
+        for (const name of Object.keys(JOINT_INFO)) {
+          prevLearnPositions[role + "_" + name] = currentPositions[role]?.[name];
+        }
+      }
+      activeLearnJoint = null;
+      document.getElementById("learn-active-joint").textContent = "--";
+      document.getElementById("learn-joint-desc").textContent = "Waiting for movement...";
+      document.getElementById("learn-joint-axis").textContent = "";
+    } else {
+      // Reset label styles
+      for (const key of Object.keys(labelElements)) {
+        const { el } = labelElements[key];
+        const isLdr = key.startsWith("leader");
+        el.style.background = isLdr ? "rgba(168,85,247,0.85)" : "rgba(14,165,233,0.85)";
+        el.style.color = "#fff";
+        el.style.fontSize = "10px";
+      }
+    }
+  };
 
   // Init when tab is first shown
   const origSwitch = window.switchTab;

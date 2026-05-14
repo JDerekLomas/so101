@@ -21,7 +21,7 @@
       "id": 3,
       "drive_mode": 0,
       "homing_offset": -156,
-      "range_min": 269,
+      "range_min": 275,
       "range_max": 4093
     },
     "wrist_flex": {

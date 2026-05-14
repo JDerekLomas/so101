@@ -610,5 +610,102 @@ def list_conversations() -> dict:
     return {"conversations": files, "total": len(files)}
 
 
+# ── Digital Twin / Simulation Tools ───────────────────────────────────────────
+
+@mcp.tool()
+def sim_generate(policy: str = "reach", episodes: int = 10,
+                 episode_length: int = 5, fps: int = 30,
+                 task: str = "sim reach",
+                 render_images: bool = False) -> dict:
+    """Generate training data from the MuJoCo digital twin using scripted policies.
+
+    Policies:
+      - random: Smooth sinusoidal joint movements for data augmentation
+      - reach: Reach to random targets, hold, retract (most useful)
+      - pick_and_place: Scripted pick-and-place motion pattern
+
+    Output is saved in the same format as the real robot recorder (JSON + optional JPG frames).
+    """
+    import subprocess
+    sim_script = Path(__file__).parent / "sim" / "digital_twin.py"
+    if not sim_script.exists():
+        return {"error": "Digital twin not found at sim/digital_twin.py"}
+
+    slug = task.lower().replace(" ", "-")
+    output = str(Path(__file__).parent / "sim" / "datasets" / f"{slug}-{policy}")
+
+    cmd = [
+        "/Users/dereklomas/lerobot-env-312/bin/python3",
+        str(sim_script), "headless",
+        "--policy", policy,
+        "--episodes", str(episodes),
+        "--episode-length", str(episode_length),
+        "--fps", str(fps),
+        "--task", task,
+        "--output", output,
+    ]
+    if render_images:
+        cmd.append("--render-images")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        return {
+            "status": "ok" if result.returncode == 0 else "error",
+            "output_dir": output,
+            "policy": policy,
+            "episodes": episodes,
+            "stdout": result.stdout[-500:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Generation timed out after 300s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def sim_mirror() -> dict:
+    """Launch the MuJoCo digital twin in mirror mode — shows the real robot's current pose in simulation.
+
+    Requires the UI server (localhost:5833) to be running.
+    Opens a MuJoCo viewer window. Close the window to stop.
+    """
+    import subprocess
+    sim_script = Path(__file__).parent / "sim" / "digital_twin.py"
+    if not sim_script.exists():
+        return {"error": "Digital twin not found at sim/digital_twin.py"}
+
+    # Launch in background since it's a GUI app
+    subprocess.Popen([
+        "/Users/dereklomas/lerobot-env-312/bin/python3",
+        str(sim_script), "mirror",
+    ])
+    return {"status": "launched", "note": "MuJoCo viewer window opened. Close it to stop."}
+
+
+@mcp.tool()
+def sim_replay(dataset_path: str, fps: int = 30) -> dict:
+    """Replay a recorded dataset in the MuJoCo simulation viewer.
+
+    Works with both real robot datasets and sim-generated datasets.
+    """
+    import subprocess
+    sim_script = Path(__file__).parent / "sim" / "digital_twin.py"
+    if not sim_script.exists():
+        return {"error": "Digital twin not found at sim/digital_twin.py"}
+
+    if not Path(dataset_path).exists():
+        return {"error": f"Dataset not found: {dataset_path}"}
+
+    subprocess.Popen([
+        "/Users/dereklomas/lerobot-env-312/bin/python3",
+        str(sim_script), "replay",
+        "--dataset", dataset_path,
+        "--fps", str(fps),
+    ])
+    return {"status": "launched", "dataset": dataset_path,
+            "note": "MuJoCo viewer replaying dataset. Close window to stop."}
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

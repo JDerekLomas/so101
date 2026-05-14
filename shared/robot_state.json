@@ -1,6 +1,6 @@
 {
   "_schema": "robot_state/v1",
-  "_updated": 1778768623.586657,
+  "_updated": 1778775890.220305,
   "connection": {
     "leader": {
       "port": "/dev/tty.usbmodem5B141116761",
@@ -19,77 +19,77 @@
     "follower": {
       "shoulder_pan": {
         "id": 1,
-        "position": 2165,
-        "temperature": 32,
-        "load": 56
+        "position": 2290,
+        "temperature": 34,
+        "load": 0
       },
       "shoulder_lift": {
         "id": 2,
-        "position": 682,
+        "position": 1090,
         "temperature": 33,
-        "load": 84
+        "load": 52
       },
       "elbow_flex": {
         "id": 3,
-        "position": 149,
-        "temperature": 39,
-        "load": 28
+        "position": 2164,
+        "temperature": 32,
+        "load": 0
       },
       "wrist_flex": {
         "id": 4,
-        "position": 2810,
-        "temperature": 34,
-        "load": 48
+        "position": 809,
+        "temperature": 35,
+        "load": 0
       },
       "wrist_roll": {
         "id": 5,
-        "position": 2716,
-        "temperature": 38,
-        "load": 28
+        "position": 3107,
+        "temperature": 37,
+        "load": 0
       },
       "gripper": {
         "id": 6,
-        "position": 1727,
+        "position": 416,
         "temperature": 36,
-        "load": 40
+        "load": 0
       }
     },
     "leader": {
       "shoulder_pan": {
         "id": 1,
-        "position": 1912,
+        "position": 2427,
         "temperature": 0,
-        "load": 800
+        "load": 1000
       },
       "shoulder_lift": {
         "id": 2,
-        "position": 933,
+        "position": 931,
         "temperature": 0,
-        "load": 0
+        "load": 190
       },
       "elbow_flex": {
         "id": 3,
-        "position": 4058,
+        "position": 4059,
         "temperature": 0,
-        "load": 0
+        "load": 1000
       },
       "wrist_flex": {
         "id": 4,
-        "position": 2939,
+        "position": 883,
         "temperature": 0,
-        "load": 0
+        "load": 508
       },
       "wrist_roll": {
         "id": 5,
-        "position": 1376,
+        "position": 2105,
         "temperature": 0,
-        "load": 0
+        "load": 1000
       },
       "gripper": {
         "id": 6,
-        "position": 1847,
+        "position": 1846,
         "temperature": 0,
-        "load": 0
+        "load": 63
       }
     }
   },
@@ -99,106 +99,85 @@
     "leader_file": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
     "last_saved": null
   },
-  "teleop_active": true,
+  "teleop_active": false,
   "events": [
     {
-      "ts": 1778768506.218391,
-      "kind": "auto_assigned",
-      "detail": {
-        "port": "/dev/tty.usbmodem5B141116761",
-        "role": "leader",
-        "p_gain": 0
-      }
-    },
-    {
-      "ts": 1778768506.220118,
-      "kind": "auto_assigned",
-      "detail": {
-        "port": "/dev/tty.usbmodem5B141123331",
-        "role": "follower",
-        "p_gain": 1
-      }
-    },
-    {
-      "ts": 1778768520.433356,
-      "kind": "teleop_stopped",
-      "detail": {}
-    },
-    {
-      "ts": 1778768562.9862468,
+      "ts": 1778775679.061707,
       "kind": "teleop_started",
       "detail": {
         "phase": "equalizing",
-        "joints": 6,
+        "joints": 3,
         "mode": "slow/explore",
         "large_gaps": {
-          "shoulder_lift": 1046,
-          "elbow_flex": 3839,
-          "wrist_flex": 694,
-          "gripper": 813
+          "shoulder_pan": 601,
+          "elbow_flex": 3754,
+          "wrist_roll": 1005
         },
         "startup_state": {
           "shoulder_pan": {
-            "f_pos": 2624,
-            "l_pos": 2268,
-            "target": 2558,
-            "clamped": 2558,
-            "gap": 66,
+            "f_pos": 2048,
+            "l_pos": 2360,
+            "target": 2649,
+            "clamped": 2649,
+            "gap": 601,
             "range": [
-              917,
+              897,
               3660
-            ]
+            ],
+            "mode": "resync"
           },
           "shoulder_lift": {
-            "f_pos": 1797,
-            "l_pos": 933,
-            "target": 664,
-            "clamped": 751,
-            "gap": 1046,
+            "f_pos": 672,
+            "l_pos": 931,
+            "target": 680,
+            "clamped": 722,
+            "gap": 50,
             "range": [
-              662,
-              2458
+              680,
+              1520
             ]
           },
           "elbow_flex": {
-            "f_pos": 63,
+            "f_pos": 149,
             "l_pos": 4058,
             "target": 4083,
-            "clamped": 3902,
-            "gap": 3839,
+            "clamped": 3903,
+            "gap": 3754,
             "range": [
-              269,
+              275,
               4093
-            ]
+            ],
+            "mode": "resync"
           },
           "wrist_flex": {
-            "f_pos": 2107,
-            "l_pos": 2939,
-            "target": 2801,
-            "clamped": 2801,
-            "gap": 694,
+            "f_pos": 2057,
+            "l_pos": 884,
+            "target": 2089,
+            "clamped": 2129,
+            "gap": 72,
             "range": [
-              2108,
-              2898
+              2088,
+              2918
             ]
           },
           "wrist_roll": {
-            "f_pos": 2034,
-            "l_pos": 874,
-            "target": 2470,
-            "clamped": 2470,
-            "gap": 436,
+            "f_pos": 2055,
+            "l_pos": 2076,
+            "target": 3060,
+            "clamped": 3060,
+            "gap": 1005,
             "range": [
-              2035,
+              2015,
               4069
-            ]
+            ],
+            "mode": "resync"
           },
           "gripper": {
-            "f_pos": 2397,
-            "l_pos": 2046,
-            "target": 1584,
-            "clamped": 1584,
-            "gap": 813,
+            "f_pos": 1366,
+            "l_pos": 1846,
+            "target": 1323,
+            "clamped": 1400,
+            "gap": 34,
             "range": [
               1323,
               2867
@@ -208,29 +187,128 @@
       }
     },
     {
-      "ts": 1778768565.6525178,
-      "kind": "teleop_collision",
-      "detail": {
-        "motor": 3,
-        "name": "elbow_flex",
-        "load": 716,
-        "frozen_at": 154
-      }
-    },
-    {
-      "ts": 1778768568.661419,
-      "kind": "teleop_collision_cleared",
-      "detail": {
-        "motor": 3,
-        "name": "elbow_flex",
-        "load": 108,
-        "resync_at": 153
-      }
-    },
-    {
-      "ts": 1778768573.7832031,
+      "ts": 1778775679.960674,
       "kind": "teleop_tracking",
       "detail": {}
+    },
+    {
+      "ts": 1778775709.38967,
+      "kind": "teleop_resync_done",
+      "detail": {
+        "motor": 1,
+        "name": "shoulder_pan",
+        "hold": 2048,
+        "leader_target": 1999
+      }
+    },
+    {
+      "ts": 1778775741.657533,
+      "kind": "calibration_saved",
+      "detail": {
+        "saved": [
+          "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
+          "/Users/dereklomas/.cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json"
+        ],
+        "warnings": [
+          "leader/shoulder_pan: only 1 ticks \u2014 skipping (would narrow from 2548)",
+          "leader/shoulder_lift: only 1 ticks \u2014 skipping (would narrow from 2439)",
+          "leader/elbow_flex: only 0 ticks \u2014 skipping (would narrow from 2206)",
+          "leader/wrist_flex: only 1 ticks \u2014 skipping (would narrow from 2345)",
+          "leader/wrist_roll: only 0 ticks \u2014 skipping (would narrow from 4078)",
+          "leader/gripper: only 0 ticks \u2014 skipping (would narrow from 1183)",
+          "follower/shoulder_pan: only 10 ticks \u2014 skipping (would narrow from 2763)",
+          "follower/shoulder_lift: only 4 ticks \u2014 skipping (would narrow from 840)",
+          "follower/elbow_flex: only 0 ticks \u2014 skipping (would narrow from 3818)",
+          "follower/wrist_flex: only 4 ticks \u2014 skipping (would narrow from 830)",
+          "follower/wrist_roll: only 5 ticks \u2014 skipping (would narrow from 2054)",
+          "follower/gripper: only 0 ticks \u2014 skipping (would narrow from 1544)"
+        ]
+      }
+    },
+    {
+      "ts": 1778775743.25506,
+      "kind": "calibration_saved",
+      "detail": {
+        "saved": [
+          "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
+          "/Users/dereklomas/.cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json"
+        ],
+        "warnings": [
+          "leader/shoulder_pan: only 1 ticks \u2014 skipping (would narrow from 2548)",
+          "leader/shoulder_lift: only 1 ticks \u2014 skipping (would narrow from 2439)",
+          "leader/elbow_flex: only 0 ticks \u2014 skipping (would narrow from 2206)",
+          "leader/wrist_flex: only 1 ticks \u2014 skipping (would narrow from 2345)",
+          "leader/wrist_roll: only 0 ticks \u2014 skipping (would narrow from 4078)",
+          "leader/gripper: only 0 ticks \u2014 skipping (would narrow from 1183)",
+          "follower/shoulder_pan: only 10 ticks \u2014 skipping (would narrow from 2763)",
+          "follower/shoulder_lift: only 4 ticks \u2014 skipping (would narrow from 840)",
+          "follower/elbow_flex: only 0 ticks \u2014 skipping (would narrow from 3818)",
+          "follower/wrist_flex: only 4 ticks \u2014 skipping (would narrow from 830)",
+          "follower/wrist_roll: only 5 ticks \u2014 skipping (would narrow from 2054)",
+          "follower/gripper: only 0 ticks \u2014 skipping (would narrow from 1544)"
+        ]
+      }
+    },
+    {
+      "ts": 1778775761.42084,
+      "kind": "teleop_wrap_halt",
+      "detail": {
+        "motor": 1,
+        "name": "shoulder_pan",
+        "prev": 2718,
+        "cur": 777,
+        "jump": -1941
+      }
+    },
+    {
+      "ts": 1778775829.317296,
+      "kind": "cal_limit_loosened",
+      "detail": {
+        "joint": "elbow_flex",
+        "new_min": 255,
+        "new_max": 4093,
+        "cycles_clean": 2000
+      }
+    },
+    {
+      "ts": 1778775839.703561,
+      "kind": "teleop_stopped",
+      "detail": {}
+    },
+    {
+      "ts": 1778775872.2311082,
+      "kind": "move_start",
+      "detail": {
+        "label": "follower",
+        "positions": {
+          "1": 2288,
+          "2": 1100,
+          "3": 2100,
+          "4": 2503,
+          "5": 3052,
+          "6": 2092
+        },
+        "ramped": true
+      }
+    },
+    {
+      "ts": 1778775883.5564191,
+      "kind": "move_complete",
+      "detail": {
+        "label": "follower",
+        "positions": {
+          "1": 2288,
+          "2": 1100,
+          "3": 2100,
+          "4": 2503,
+          "5": 3052,
+          "6": 2092
+        },
+        "ramped": true,
+        "collisions": {
+          "elbow_flex": 388
+        }
+      }
     }
   ]
 }
