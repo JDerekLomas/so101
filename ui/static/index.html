@@ -278,10 +278,12 @@
 <!-- ============================================================ -->
 <div id="panel-status" class="panel active">
   <div style="margin-bottom:12px">
-    <button class="btn-primary" id="btn-teleop-start" onclick="teleopStart()">▶ Start Teleop</button>
+    <button class="btn-primary" id="btn-teleop-start" onclick="teleopStart(false)">▶ Start Teleop</button>
+    <button class="btn-secondary" id="btn-teleop-slow" onclick="teleopStart(true)" title="Slow/explore: 1/4 speed, tight limits">🐢 Explore</button>
     <button class="btn-danger"  id="btn-teleop-stop"  onclick="teleopStop()" style="display:none">■ Stop Teleop</button>
     <span id="teleop-status" style="margin-left:10px;font-size:13px;color:#888"></span>
   </div>
+  <div id="temp-warning" style="display:none;background:#7f1d1d;color:#fca5a5;padding:6px 10px;border-radius:4px;margin-bottom:8px;font-size:13px"></div>
   <div id="status-arms" class="status-arms"></div>
   <div id="status-events" class="status-events"></div>
 </div>
@@ -507,7 +509,8 @@ es.onmessage = e => {
     renderBoards(lastSnapshot);
     renderCal(lastCal, lastSnapshot);
     if (data.notifications) renderNotifications(data.notifications);
-    updateTeleopUI(!!data.teleop, data.teleop_phase);
+    updateTeleopUI(!!data.teleop, data.teleop_phase, !!data.teleop_slow, data.teleop_halted || []);
+    updateTempWarning(data.boards || {});
   } catch {}
 };
 es.onerror = () => setStatus("port", "Stream disconnected.", "err");
@@ -714,44 +717,83 @@ async function calSave() {
 // ---------------------------------------------------------------- //
 // Teleop                                                            //
 // ---------------------------------------------------------------- //
-async function teleopStart() {
-  const res  = await fetch("/api/teleop/start", { method: "POST" });
+async function teleopStart(slow) {
+  const res  = await fetch("/api/teleop/start", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({slow: !!slow}),
+  });
   const data = await res.json();
   if (!data.ok) {
     document.getElementById("teleop-status").textContent = "Error: " + (data.error || "unknown");
+    document.getElementById("teleop-status").style.color = "#f87171";
     return;
   }
   document.getElementById("btn-teleop-start").style.display = "none";
+  document.getElementById("btn-teleop-slow").style.display  = "none";
   document.getElementById("btn-teleop-stop").style.display  = "";
-  document.getElementById("teleop-status").textContent = "LIVE — move leader to drive follower";
+  const mode = slow ? "🐢 EXPLORE (slow)" : "LIVE";
+  document.getElementById("teleop-status").textContent = mode + " — move leader to drive follower";
 }
 
 async function teleopStop() {
   await fetch("/api/teleop/stop", { method: "POST" });
   document.getElementById("btn-teleop-start").style.display = "";
+  document.getElementById("btn-teleop-slow").style.display  = "";
   document.getElementById("btn-teleop-stop").style.display  = "none";
   document.getElementById("teleop-status").textContent = "Stopped";
+  document.getElementById("teleop-status").style.color = "#888";
 }
 
-function updateTeleopUI(active, phase) {
+function updateTeleopUI(active, phase, slow, halted) {
   const start = document.getElementById("btn-teleop-start");
+  const slowBtn = document.getElementById("btn-teleop-slow");
   const stop  = document.getElementById("btn-teleop-stop");
   const lbl   = document.getElementById("teleop-status");
   if (!start) return;
   if (active) {
-    start.style.display = "none";
-    stop.style.display  = "";
+    start.style.display   = "none";
+    slowBtn.style.display = "none";
+    stop.style.display    = "";
+    const modePrefix = slow ? "🐢 EXPLORE" : "LIVE";
     if (phase === "equalizing") {
-      lbl.textContent = "Equalizing — moving follower to match leader…";
+      lbl.textContent = modePrefix + " — equalizing (moving to match leader)…";
       lbl.style.color = "#f59e0b";
+    } else if (halted && halted.length > 0) {
+      const names = {1:"pan",2:"lift",3:"elbow",4:"wrist_flex",5:"wrist_roll",6:"gripper"};
+      const joints = halted.map(id => names[id] || id).join(", ");
+      lbl.textContent = modePrefix + ` — wrap-halted: ${joints}`;
+      lbl.style.color = "#f87171";
     } else {
-      lbl.textContent = "LIVE — move leader to drive follower";
-      lbl.style.color = "#4ade80";
+      lbl.textContent = modePrefix + " — move leader to drive follower";
+      lbl.style.color = slow ? "#60a5fa" : "#4ade80";
     }
   } else {
-    start.style.display = "";
-    stop.style.display  = "none";
+    start.style.display   = "";
+    slowBtn.style.display = "";
+    stop.style.display    = "none";
     lbl.style.color = "#888";
+  }
+}
+
+function updateTempWarning(boards) {
+  const warn = document.getElementById("temp-warning");
+  if (!warn) return;
+  const hot = [];
+  for (const [port, board] of Object.entries(boards)) {
+    if (board.label !== "follower") continue;
+    for (const [id, temp] of Object.entries(board.temps || {})) {
+      if (temp !== null && temp >= 55) {
+        const name = {1:"pan",2:"lift",3:"elbow",4:"wrist_flex",5:"wrist_roll",6:"gripper"}[id] || id;
+        hot.push(`${name}: ${temp}°C`);
+      }
+    }
+  }
+  if (hot.length > 0) {
+    warn.style.display = "";
+    warn.textContent = "⚠ Hot motors (teleop blocked ≥60°C): " + hot.join(", ");
+  } else {
+    warn.style.display = "none";
   }
 }
 

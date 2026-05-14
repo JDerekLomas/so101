@@ -225,11 +225,14 @@ def read_register(ph, handler, mid, addr, length=2, retries=3):
 
 
 def write_register(ph, handler, mid, addr, value, length=2):
+    """Fire-and-forget write — uses TxOnly so it never blocks waiting for a status packet.
+    Servos with return-level=1 (lerobot default) don't send status on writes, so TxRx
+    would time out on every call and stall the loop."""
     try:
         if length == 1:
-            result, _ = handler.write1ByteTxRx(ph, mid, addr, value)
+            result = handler.write1ByteTxOnly(ph, mid, addr, value)
         else:
-            result, _ = handler.write2ByteTxRx(ph, mid, addr, value)
+            result = handler.write2ByteTxOnly(ph, mid, addr, value)
         return result == 0
     except Exception:
         return False

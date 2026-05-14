@@ -1,9 +1,9 @@
 {
-  "indexed_at": "2026-05-14T14:19:59",
+  "indexed_at": "2026-05-14T14:52:45",
   "sessions": 3,
-  "total_messages": 301,
-  "user_messages": 47,
-  "assistant_messages": 254,
+  "total_messages": 449,
+  "user_messages": 69,
+  "assistant_messages": 380,
   "session_ids": [
     "1bb22f10-2c62-428e-ac15-42afcc7a7b65",
     "45df2c82-dfe6-437a-84ab-019cf669bc03",

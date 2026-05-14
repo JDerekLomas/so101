@@ -209,5 +209,52 @@
       "sync"
     ],
     "done": false
+  },
+  {
+    "id": "handoff-session-10c",
+    "ts": 1778760600.0,
+    "from": "claude-session-10b",
+    "text": "Leader velocity feedforward added to UI teleop loop (commit b2d1f41). Formula: speed = 1.2*|error| + 0.6*|leader_vel|, clamped [80,500]. Reads PRESENT_SPEED_ADDR (58) each cycle during live tracking. Speed register writes (addr 46) were already ported by parallel worker. Encoder wrap detection also already present. Server needs restart to pick up changes. Speed register open question resolved — now in session_log open_questions: test with restart, check leader vel register returns useful values at 20Hz.",
+    "tags": [
+      "handoff",
+      "teleop",
+      "velocity-feedforward",
+      "sync"
+    ],
+    "done": false
+  },
+  {
+    "id": "handoff-session-10d",
+    "ts": 1778761200.0,
+    "from": "claude-session-10b",
+    "text": "Ramped moves now read actual position each cycle (commit 05d5c10). Previously tracked assumed positions in a 'sent' dict — would drift if motor stalled under load. Now reads board['positions'] (poll loop, 20Hz fresh) so ramp self-corrects. Implements P2 (know before move) at the servo level. Other worker is making parallel changes: always-on calibration tracking, exception handling in auto_scan, updated MCP cal tools. No conflicts — our changes are to different sections of app.py.",
+    "tags": [
+      "handoff",
+      "ramped-moves",
+      "P2",
+      "sync"
+    ],
+    "done": false
+  },
+  {
+    "id": "handoff-session-11",
+    "ts": 1778762400.0,
+    "from": "claude-session-11",
+    "text": "Session 11: (1) MCP server expanded to 22 tools: added selftest (physical joint probe with pre-flight), search_conversations, list_conversations. (2) Conversation history indexer (scripts/index_conversations.py) reads raw Claude Code JSONL transcripts, builds searchable index at shared/conversation_history/index.jsonl. First run: 301 messages from 3 sessions. SessionStart hook auto-indexes in background. (3) Collision detection added to ramped moves: load > 350 immediately stops joint and disables torque. Teleop collision detection (by parallel worker) freezes joint, resumes when load < 150. Two-tier: collision=350 (reactive), stall=800 (backstop). (4) UI server restarted with collision detection live. Commits: 7b17e2f (selftest+indexer+search), cf932a8 (collision detection). NEXT: test collision detection threshold tuning, MCP restart for new tools, end-to-end UX flow.",
+    "tags": [
+      "handoff",
+      "collision-detection",
+      "conversation-history",
+      "selftest",
+      "sync"
+    ],
+    "done": false
+  },
+  {
+    "id": "handoff-session-11b",
+    "ts": 1778763600.0,
+    "from": "claude-session-11b",
+    "text": "Session 11b: Cybernetic world model. (1) /api/autocalibrate probes joints via load feedback — finds physical limits. (2) /api/workspace/probe maps obstacles across joint pairs — probed elbow_flex at 8 shoulder_lift positions, found desk at ~100-150. (3) P9 safety principle: workspace limits in safety.json clamp positions in /api/move and teleop. Three-layer safety: workspace->calibration->collision. (4) Tested: sent elbow_flex=50, clamped to 255. Desk can't be hit through any code path. (5) 25 MCP tools, all auto-approved. Commits: 7b17e2f, cf932a8, dda0648.",
+    "tags": ["handoff", "workspace", "autocalibrate", "P9", "world-model"]
   }
 ]
