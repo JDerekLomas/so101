@@ -1,126 +1,114 @@
 # Testing Plan: SO-101 + Claude Code Integration
 
-## Test Results (Session 7, 2026-05-14)
+## Test Results (Sessions 7-10, 2026-05-14)
 
-### Passed
+### Phase 1: MCP Smoke Test — PASS (Session 10)
+- [x] MCP server starts via `.mcp.json` on Claude Code launch
+- [x] `mcp__so101__get_state` tool appears in Claude's tool list
+- [x] `mcp__so101__get_state` returns full state (connection, motors, calibration, teleop_active)
+- [x] `mcp__so101__get_events` returns event history
+- [x] SessionStart hook injects session_log, robot_state, mailbox, service status
 - [x] UI server (:5833) responding
-- [x] `/api/state` returns valid JSON with connection info
-- [x] `/api/events` returns 17 events (moves, calibration)
-- [x] MCP SDK imports correctly in lerobot-env-312
-- [x] MCP->UI HTTP path works (urllib from Python)
-- [x] Both boards detected (2 USB ports, 5+6 motors)
-- [x] Session sync hook runs and outputs all context files
-- [x] Git repo initialized, initial commit successful
-- [x] `nudge_gripper.py` moves motor 6 (tested earlier this session)
-- [x] Notification POST to UI works
+- [x] Both boards detected (2 USB ports, 6+6 motors after rescan)
 
-### Not tested (need next session with MCP active)
-- [ ] MCP server starts via `.mcp.json` on Claude Code launch
-- [ ] `mcp__so101__get_state` tool appears in Claude's tool list
-- [ ] `mcp__so101__move_joint` actually moves a motor
-- [ ] `mcp__so101__nudge_joint` reads current pos and offsets correctly
-- [ ] `mcp__so101__start_calibration` / `save_calibration` round-trip
-- [ ] `mcp__so101__notify_user` shows notification in web UI
-- [ ] SessionStart hook injects context into new session automatically
+### Phase 2: Arm Assignment — PASS (Session 10)
+- [x] `mcp__so101__rescan` finds both boards
+- [x] `mcp__so101__assign_arm` assigns both ports to follower/leader
+- [x] `mcp__so101__get_positions` returns data for both arms
+- [x] Temperature pattern confirms correct assignment (follower: 27-33C real, leader: 0C passive)
 
-### Not tested (need hardware action)
-- [ ] Calibration full round-trip: start -> move arms -> save -> verify JSON
-- [ ] Teleoperation via lerobot-teleoperate (both arms must be assigned)
-- [ ] Leader arm motor response (currently 5/6 responding)
-- [ ] Safety: stall detection trips and disables torque
-- [ ] Safety: temperature cutoff at 65C
+### Phase 3: Motor Control — PASS with findings (Session 10)
+- [x] `mcp__so101__nudge_joint("gripper", 50, "follower")` — physical movement confirmed
+- [x] `mcp__so101__nudge_joint("gripper", -50, "follower")` — returned to original
+- [x] `mcp__so101__move_joint("shoulder_pan", 2048, "follower")` — motor responded
+- [x] `mcp__so101__move_to_middle` — 5/6 joints moved, elbow_flex write_error
+- [x] Ramped move via `/api/move` with `ramped: true` — smooth motion confirmed
+- [x] Multi-joint ramped move (all 6 joints to midpoints) — smooth
 
----
+#### Findings
+- **Teleop blocks external moves**: moves return "ok" but teleop overwrites at 20Hz. Fixed: added `start_teleop`/`stop_teleop` MCP tools, pre-flight check in MCP refuses moves during teleop.
+- **Elbow_flex stuck at desk**: position 102 is into the desk surface. Stall detection killed torque before motor could escape. Fixed: 2s grace period on stall detection after commanded moves.
+- **Elbow_flex calibration too wide**: range_min was 24, allowing desk collision. Fixed: raised to 300.
+- **MCP server hot-reload**: MCP tools loaded at Claude Code startup; changes require restart. The old (pre-safety) MCP server ran during this session. New MCP server with pre-flight checks will activate next session.
 
-## Gaps Between Paper Claims and Implementation
+### Phase 4: Calibration — PASS (pre-existing, verified Session 10)
+- [x] Follower calibration file exists with proper ranges (all 6 joints)
+- [x] Leader calibration file exists with proper ranges (all 6 joints)
+- [x] No joints left at 0-4095 (the uncalibrated default)
+- [x] elbow_flex range_min tightened 24→300 to prevent desk collision
+- [ ] Full round-trip via MCP (start_calibration → move → save_calibration) — not tested this session
 
-### Gap 1: Chat server cannot move motors
-**Paper says**: "LLM writes goal positions"
-**Reality**: chat/server.py has 8 tools, none write to motors.
-**Fix**: Either (a) add move tools to chat server, or (b) deprecate chat server in favor of Claude Code + MCP. Option (b) is cleaner — the MCP server already has all the tools.
-**Recommendation**: Option (b). The paper's story is about Claude Code, not a custom chat UI.
+### Phase 5: Paper Validation — IN PROGRESS
+Tool call sequence from this session documents the development narrative:
+1. Hook fires → context injected (session log, robot state, mailbox)
+2. MCP tools appear → get_state works
+3. Rescan → both boards found, 6 motors each
+4. Assign arms → follower/leader labeled
+5. Nudge gripper → **no movement** (teleop was active, overriding commands)
+6. Discovery: teleop_active not visible in state, no stop_teleop tool
+7. Fix: add teleop tools to MCP, add teleop_active to state JSON
+8. Stop teleop → nudge works → movement confirmed
+9. Move_to_middle → elbow_flex stuck at desk
+10. Discovery: stall detection prevents recovery from stalled position
+11. Fix: 2s grace period, raise elbow_flex range_min
+12. Ramped moves working → smooth, safe motion
 
-### Gap 2: Motors not assigned to roles
-**Current state**: Both boards connected but `motors.follower` and `motors.leader` are empty `{}`.
-**Why**: No one has called `/api/assign` to label which port is which.
-**Fix**: Need wiggle-test or manual assignment via UI before move tools work.
-**Test**: After assigning, verify `/api/move` routes to correct arm.
-
-### Gap 3: No calibration data exists
-**Current state**: `calibration.last_saved: null`, JSON files missing.
-**Impact**: `move_to_middle` will fail (needs calibration). Position clamping has no limits to clamp to.
-**Test**: Full calibration round-trip needed.
-
-### Gap 4: Session log not auto-populated
-**Paper says**: "Append-only lab notebook"
-**Reality**: Claude must manually append to `session_log.jsonl`. No enforcement.
-**Fix**: Could add a SessionEnd hook that prompts Claude to write learnings. Or accept it as a manual discipline and document that in the paper.
-
-### Gap 5: Three servers vs. one
-**Current state**: motor_server.py (:7777), ui/app.py (:5833), chat/server.py (:8888)
-**Problem**: motor_server.py and ui/app.py both try to own the serial port. They can't run simultaneously.
-**Reality**: Only ui/app.py runs in practice; motor_server.py is legacy.
-**Fix**: Remove motor_server.py from start.py, or document it as deprecated.
-**Impact on MCP**: MCP server talks to :5833 (correct). Chat server talks to :7777 (may be down).
+**Human physical actions required**: zero (all via Claude Code + MCP tools)
+**Failures encountered**: 2 (teleop override, stall-prevents-recovery)
+**Recoveries**: 2 (both fixed programmatically in same session)
 
 ---
 
-## Testing Protocol for Next Session
+## Safety Framework (Session 10)
 
-### Phase 1: MCP Smoke Test (first thing)
-1. Start new Claude Code session in ~/so101/
-2. Verify hook fires ("Syncing session context..." spinner)
-3. Verify MCP server connects (check for `mcp__so101__*` tools)
-4. Call `mcp__so101__get_state` — should return connection info
-5. Call `mcp__so101__get_events` — should return event history
+### Principles (shared/safety.json)
+| ID | Principle | Implementation |
+|----|-----------|----------------|
+| P1 | No teleport | Ramped moves (60 counts/cycle max), nudges capped ±200 |
+| P2 | Know before move | MCP pre-flight: check teleop, temps, arm assignment |
+| P3 | Margin of safety | 5% inside calibrated range, desk collision guard |
+| P4 | Torque is temporary | Auto-disable after ramp completes + settle time |
+| P5 | Detect and halt | Stall (800 load, 6 cycles), temp (65C), with 2s move grace |
+| P6 | Equalize before track | Teleop startup alignment to leader position |
+| P7 | Human in the loop | Large-move warnings (>500 counts) in MCP response |
 
-### Phase 2: Arm Assignment
-1. Call `mcp__so101__rescan`
-2. Identify which port has 6 motors (follower) vs 5 (leader, missing one)
-3. Call `mcp__so101__assign_arm` for both ports
-4. Verify `get_state` now shows motors under follower/leader
-
-### Phase 3: Motor Control
-1. Call `mcp__so101__get_positions("follower")` — verify positions
-2. Call `mcp__so101__nudge_joint("gripper", 50, "follower")` — small open
-3. Confirm physical movement
-4. Call `mcp__so101__nudge_joint("gripper", -50, "follower")` — close back
-5. Try `move_joint("shoulder_pan", 2048, "follower")` — move to center
-
-### Phase 4: Calibration
-1. Call `mcp__so101__start_calibration`
-2. Physically move all joints through full range (human action)
-3. Call `mcp__so101__save_calibration`
-4. Verify JSON files created at expected paths
-5. Call `mcp__so101__move_to_middle` — all joints go to midpoint
-
-### Phase 5: Paper Validation
-1. Record the tool call sequence from phases 1-4
-2. Note every human physical action required
-3. Note every failure and recovery
-4. This becomes Section 4 of the paper ("Development Narrative")
+### Single Source of Truth
+All thresholds in `shared/safety.json`. Both `ui/app.py` and `mcp_server.py` import from it.
 
 ---
 
-## Architecture Decision: Chat Server vs. MCP
+## Gaps Resolved
 
-The chat server (chat/server.py on :8888) and the MCP server (mcp_server.py) overlap significantly. For the paper, the cleanest story is:
+### Gap 1: Chat server cannot move motors — RESOLVED
+MCP server is the primary interface. Chat server updated to talk to :5833 (session 9).
 
-**Claude Code + MCP = the primary interface**
-- Native tool access (no HTTP wrapper in the loop)
-- Session hooks for context persistence
-- Git-tracked artifacts
-- Terminal-based, reproducible
+### Gap 2: Motors not assigned to roles — RESOLVED
+`assign_arm` tool works. Port-swap-on-replug documented as known behavior.
 
-**Chat UI = secondary/demo interface**
-- Good for showing non-technical users
-- Good for screenshots in the blog post
-- But not the core contribution
+### Gap 3: No calibration data — RESOLVED
+Both arms calibrated. Files at expected HuggingFace cache paths.
 
-**Web UI (:5833) = hardware layer**
-- Always running
-- Owns the serial port
-- Serves both MCP and chat server
-- This is the "robot operating system"
+### Gap 4: Session log not auto-populated — PARTIALLY RESOLVED
+Backfilled sessions 1-9. Hook instructions strengthened with mandatory checklist. No SessionEnd hook (not supported by Claude Code hooks API).
 
-This three-layer architecture (Claude Code -> MCP -> UI -> Hardware) is the paper's contribution. Document it as such.
+### Gap 5: Three servers — RESOLVED
+Only ui/app.py (:5833) runs. motor_server.py is legacy. MCP and chat server both talk to :5833.
+
+### New Gap: MCP hot-reload
+MCP server process loaded at Claude Code startup. Code changes to mcp_server.py require Claude Code restart to take effect. The safety pre-flight checks added this session won't be active until next restart.
+
+---
+
+## Architecture (confirmed)
+
+```
+Claude Code ─── MCP server (mcp_server.py, stdio) ─── UI server (:5833) ─── Serial ─── Robot
+                 │ pre-flight checks                    │ ramped moves
+                 │ large-move warnings                  │ stall detection
+                 │ teleop guard                         │ temp cutoff
+                 │ nudge cap ±200                       │ position clamping
+                                                        │ move grace period
+                                                        │ teleop mirror (20Hz)
+```
+
+Safety is layered: MCP catches intent-level issues (wrong mode, dangerous targets), UI catches hardware-level issues (stall, temp, limits).

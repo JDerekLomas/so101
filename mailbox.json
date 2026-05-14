@@ -59,7 +59,7 @@
       "diagnostics",
       "paper"
     ],
-    "done": false
+    "done": true
   },
   {
     "id": "170e3b5e",
@@ -73,14 +73,141 @@
       "sync",
       "handoff"
     ],
-    "done": false
+    "done": true
   },
   {
     "id": "handoff-session-7",
     "ts": 1778754300.0,
     "from": "claude-session-7",
-    "text": "Session 7: (1) Built MCP server at mcp_server.py — 14 tools wrapping UI HTTP API: get_state, get_positions, move_joint, move_joints, move_to_middle, nudge_joint, rescan, assign_arm, start/stop/save/reset_calibration, get_events, notify_user. Config in .mcp.json. (2) Added SessionStart hook (.claude/hooks/session-sync.sh) — auto-injects session_log.jsonl, robot_state.json, mailbox.json, and service status into every new session. Config in settings.local.json. (3) Initialized git repo with initial commit (e8fb334, 21 files). (4) Created paper/outline.md — arXiv + blog structure. (5) Earlier in session: nudge_gripper.py confirmed working (gripper pos ~2400, +80 opens, -80 closes). (6) Next session should: restart Claude Code to pick up MCP server, test tools natively, then proceed with calibration.",
-    "tags": ["handoff", "mcp", "hooks", "git", "paper"],
+    "text": "Session 7: (1) Built MCP server at mcp_server.py \u2014 14 tools wrapping UI HTTP API: get_state, get_positions, move_joint, move_joints, move_to_middle, nudge_joint, rescan, assign_arm, start/stop/save/reset_calibration, get_events, notify_user. Config in .mcp.json. (2) Added SessionStart hook (.claude/hooks/session-sync.sh) \u2014 auto-injects session_log.jsonl, robot_state.json, mailbox.json, and service status into every new session. Config in settings.local.json. (3) Initialized git repo with initial commit (e8fb334, 21 files). (4) Created paper/outline.md \u2014 arXiv + blog structure. (5) Earlier in session: nudge_gripper.py confirmed working (gripper pos ~2400, +80 opens, -80 closes). (6) Next session should: restart Claude Code to pick up MCP server, test tools natively, then proceed with calibration.",
+    "tags": [
+      "handoff",
+      "mcp",
+      "hooks",
+      "git",
+      "paper"
+    ],
+    "done": true
+  },
+  {
+    "id": "953fd49e",
+    "ts": 1778755011.779744,
+    "from": "claude-session-5",
+    "text": "CALIBRATION + FIRST TELEOPERATION 2026-05-14. Ranges saved to calibration files (union method). Leader shoulder_pan significantly wider: 935-2685\u2192741-3278. BREAKTHROUGH: follower wrist_flex responds to direct writes. Earlier write failures were on wrong port (leader misidentified as follower). wrist_follow.py works: leader wrist_flex \u2192 follower wrist_flex with 5% safety margin, speed=200. Follower tracked to target 1064 and held at \u00b12 counts \u2014 good. Leader wrist resting at 883 (below safe floor 992) so no leader motion was demonstrated yet. SAFETY DECISION: use 90% of calibrated range (5% margin each side) for all commanded motion. Motor server restarted on correct follower port 5B141123331. scripts/wrist_follow.py written for single-joint teleoperation test. Open issue: leader gripper not showing in UI (motor server only tracks follower). Port swap caveat persists \u2014 must wiggle-test after every replug.",
+    "tags": [
+      "calibration",
+      "teleop",
+      "breakthrough",
+      "sync",
+      "handoff"
+    ],
+    "done": true
+  },
+  {
+    "id": "handoff-session-8a",
+    "ts": 1778755307.22856,
+    "from": "claude-session-8",
+    "text": "Session 8 partial sync: (1) Leader cal saved directly from captured ranges \u2014 shoulder_pan[781-3267], shoulder_lift[930-3369], elbow_flex[1858-4064], wrist_flex[882-3227], wrist_roll[2-4065], gripper[1846-3018]. wrist_roll was 0-4095 before, now calibrated. (2) Follower cal still needed \u2014 server poll loop corrupts follower bus during continuous reading, causing cal recording to fail. Fix: run dedicated slow-rate cal script with server stopped. (3) Discovered: lock=1 on all follower motors (EEPROM lock, NOT blocking SRAM writes \u2014 test writes succeed). Voltage=12.2V (within spec). (4) Error counter bug fixed (cap at 100). (5) Session 7 MCP server confirmed at mcp_server.py, .mcp.json in ~/so101/. Needs Claude Code restart to pick up tools. (6) Next: follower cal pass with server stopped, then restart server, then test teleoperation.",
+    "tags": [
+      "handoff",
+      "calibration",
+      "sync"
+    ],
+    "done": false
+  },
+  {
+    "id": "df026b68",
+    "ts": 1778755797.466542,
+    "from": "claude-session-5",
+    "text": "Motor troubleshooting + diagnostics added to knowledge base (section 10). Covers: chunky/stiff movement (overload, PID, accel ramp, gear wear), overheating thresholds, voltage errors (12V vs 7.4V motor variants), comm errors fix sequence, overload recovery, calibration drift bugs, gripper failure prevention, full maintenance checklist, community failure mode table. Includes working diagnostic Python snippet (reads load/volt/temp/status for all motors). CALIBRATION STATUS: both arms have valid cal files. Follower: shoulder_pan 917-3660, shoulder_lift 659-3110, elbow_flex 0-4095, wrist_flex 945-3339, wrist_roll 0-4095, gripper 1323-2862. Leader: shoulder_pan 781-3267, shoulder_lift 930-3369, elbow_flex 1858-4064, wrist_flex 882-3227, wrist_roll 2-4065, gripper 1846-3018. Session 8 MCP server noted \u2014 needs Claude Code restart to pick up tools. Next recommended: run diagnostic health check on both arms, then test full teleoperation.",
+    "tags": [
+      "knowledge-base",
+      "diagnostics",
+      "calibration",
+      "sync",
+      "handoff"
+    ],
+    "done": false
+  },
+  {
+    "id": "0x535881f7",
+    "ts": 1778757264.346606,
+    "from": "claude-session-9",
+    "text": "Session 9 sync: (1) Confirmed port assignments via PID gains (definitive method, no arm movement needed): 5B141123331=FOLLOWER(P=16,D=32), 5B141116761=LEADER(P=0,D=0). KB section 9 had these BACKWARDS \u2014 corrected. (2) Fixed KB structure: ToC now includes all 11 sections, renumbered Known Footguns\u219210, Motor Health\u219211. (3) Follower acc=100 applied last session documented in KB. (4) Both arms online, 6/6 motors each, no errors. Leader temp reads 0\u00b0C (scaling artifact for 7.4V variant, not a fault). (5) ui/app.py is the active server (:5833), holds both ports. motor_server.py (legacy :7777) not running. mcp_server.py running. (6) Next recommended: run full health diagnostic on both arms, then test full 6-joint teleoperation via wrist_follow.py extended to all joints.",
+    "tags": [
+      "sync",
+      "handoff",
+      "ports",
+      "kb-fix"
+    ],
+    "done": true
+  },
+  {
+    "id": "0xe911ba77",
+    "ts": 1778758094.048728,
+    "from": "claude-session-9",
+    "text": "SAFETY FIXES applied after teleop incident. elbow_flex overshot encoder wrap (0-4095 uncalibrated range) -> stalled against hard stop, grinding sound. No damage (temp 29C, load 0 after). Fixes: (1) Follower calibration updated: elbow_flex now 24-4051, wrist_roll now 27-3892 (both were uncalibrated 0-4095). Other joints: union with prior. (2) teleop_6joint.py rewritten with 5 safety layers: range clamping (5% margin), startup equalization (follower moves to match leader before tracking starts), per-cycle step cap (MAX_STEP=80 counts/cycle), encoder wrap detection (halt joint if pos jumps >1500 counts), load monitoring (emergency stop if >75%). Speed lowered to 200.",
+    "tags": [
+      "safety",
+      "calibration",
+      "teleop",
+      "incident",
+      "handoff"
+    ],
+    "done": true
+  },
+  {
+    "id": "0x42440314",
+    "ts": 1778758222.004998,
+    "from": "claude-session-9",
+    "text": "TELEOP SAFETY + CALIBRATION update. Incident: elbow_flex stalled at hard stop (pos 160) after encoder wrap \u2014 grinding sound, no damage. Root cause: elbow_flex and wrist_roll calibration was 0-4095 (never swept). Fix 1: Follower recalibrated \u2014 elbow_flex 24-4051, wrist_roll 27-3892. Shared to ~/so101/shared/calibration.json. Fix 2: teleop_6joint.py now has cybernetic control loop: proportional speed (K=1.2 * error + 0.6 * leader_velocity feedforward), startup equalization, encoder wrap halt, load emergency stop. No more teleporting: speed scales with error so follower ramps smoothly. No more blind sending: follower tracking error printed every cycle.",
+    "tags": [
+      "safety",
+      "calibration",
+      "teleop",
+      "cybernetics",
+      "sync",
+      "handoff"
+    ],
+    "done": true
+  },
+  {
+    "id": "0x6b9fdb3d",
+    "ts": 1778758461.337578,
+    "from": "claude-session-9",
+    "text": "Session 9 FINAL sync. All fixes complete: (1) chat/server.py updated: MOTOR_API 7777->5833, all endpoints updated to /api/ prefix, live_state_summary reads both arms, start_teleoperate now uses teleop_6joint.py (proportional speed, safety). (2) Mailbox messages marked done. (3) Calibration shared to ~/so101/shared/calibration.json. (4) KB sections 1-11 accurate and organized. NEXT RECOMMENDED: (a) test chat server with updated endpoints, (b) run teleop_6joint.py and test cybernetic tracking with leader movement, (c) add KB section on control loop / cybernetics, (d) record first dataset episode for paper.",
+    "tags": [
+      "final-sync",
+      "handoff",
+      "chat-server",
+      "complete"
+    ],
+    "done": false
+  },
+  {
+    "id": "0x6a05b636",
+    "ts": 1778759222.535986,
+    "from": "claude-session-10",
+    "text": "TELEOP AUDIT + PLAN. Reviewed our teleop implementation against lerobot source and community practice. Findings: (1) Position mapping is CORRECT \u2014 homing_offset is hardware-applied, our range_min/range_max linear mapping is equivalent to lerobot normalize/unnormalize chain. (2) CRITICAL GAP: we never write to speed register (addr 46). Servo moves at default/last-set speed regardless of our position ramp. This causes loud/fast motor sounds. Fix: write proportional speed each cycle alongside goal_position \u2014 speed = K * abs(error) + feedforward. (3) No encoder wrap detection (jumps >1500 counts should halt joint). (4) 20Hz loop, no velocity feedforward from leader velocity register (addr 58). (5) Joint-space is pragmatic and fine for dataset recording. EE-space (FK/IK via URDF) is theoretically superior but not needed now. NEXT ACTION: add speed register (addr 46) writes to server teleop loop with proportional control. This is the single highest-impact fix. teleop_6joint.py (session 9) already has the right formula: speed = clamp(K_SPEED * abs(error) + FF_GAIN * leader_vel, SPEED_MIN, SPEED_MAX). We should port this into app.py poll loop. Label persistence fix already deployed. Startup equalization already deployed.",
+    "tags": [
+      "audit",
+      "teleop",
+      "plan",
+      "sync"
+    ],
+    "done": false
+  },
+  {
+    "id": "handoff-session-10b",
+    "ts": 1778760000.0,
+    "from": "claude-session-10",
+    "text": "Session 10 (this session): MCP testing plan phases 1-4 executed. All MCP tools work live. KEY FIXES: (1) Safety framework: shared/safety.json defines 7 principles (P1-P7) and all thresholds. Both ui/app.py and mcp_server.py import from it. (2) Ramped moves: /api/move accepts 'ramped':true, steps at 60 counts/cycle — no more teleporting. MCP sends ramped by default. (3) Pre-flight checks in MCP: refuses moves during teleop, checks temps, warns on large moves. (4) Stall recovery grace: 2s window after commanded moves where stall detection is suppressed, so motors can escape stall zones. (5) Elbow_flex range_min raised 24->300 (desk collision prevention). (6) start_teleop/stop_teleop MCP tools added. teleop_active now in robot_state.json. (7) Session log backfilled for sessions 1-3,6. Hook instructions strengthened. (8) Testing plan fully updated with results. STILL NEEDS: (a) Claude Code restart to pick up new MCP server with pre-flight checks. (b) Speed register writes (addr 46) in UI teleop loop for proportional speed. (c) Full calibration round-trip test via MCP. (d) First dataset recording episode.",
+    "tags": [
+      "handoff",
+      "safety-framework",
+      "testing",
+      "sync"
+    ],
     "done": false
   }
 ]

@@ -277,6 +277,11 @@
 <!-- STATUS TAB                                                    -->
 <!-- ============================================================ -->
 <div id="panel-status" class="panel active">
+  <div style="margin-bottom:12px">
+    <button class="btn-primary" id="btn-teleop-start" onclick="teleopStart()">▶ Start Teleop</button>
+    <button class="btn-danger"  id="btn-teleop-stop"  onclick="teleopStop()" style="display:none">■ Stop Teleop</button>
+    <span id="teleop-status" style="margin-left:10px;font-size:13px;color:#888"></span>
+  </div>
   <div id="status-arms" class="status-arms"></div>
   <div id="status-events" class="status-events"></div>
 </div>
@@ -502,6 +507,7 @@ es.onmessage = e => {
     renderBoards(lastSnapshot);
     renderCal(lastCal, lastSnapshot);
     if (data.notifications) renderNotifications(data.notifications);
+    updateTeleopUI(!!data.teleop, data.teleop_phase);
   } catch {}
 };
 es.onerror = () => setStatus("port", "Stream disconnected.", "err");
@@ -703,6 +709,50 @@ async function calSave() {
   if (data.skipped.length) parts.push("Skipped: " + data.skipped.join("; "));
   if (data.warnings.length) parts.push("⚠ " + data.warnings.join("; "));
   setStatus("cal", parts.join("  |  ") || "Done.", data.warnings.length ? "warn" : "ok");
+}
+
+// ---------------------------------------------------------------- //
+// Teleop                                                            //
+// ---------------------------------------------------------------- //
+async function teleopStart() {
+  const res  = await fetch("/api/teleop/start", { method: "POST" });
+  const data = await res.json();
+  if (!data.ok) {
+    document.getElementById("teleop-status").textContent = "Error: " + (data.error || "unknown");
+    return;
+  }
+  document.getElementById("btn-teleop-start").style.display = "none";
+  document.getElementById("btn-teleop-stop").style.display  = "";
+  document.getElementById("teleop-status").textContent = "LIVE — move leader to drive follower";
+}
+
+async function teleopStop() {
+  await fetch("/api/teleop/stop", { method: "POST" });
+  document.getElementById("btn-teleop-start").style.display = "";
+  document.getElementById("btn-teleop-stop").style.display  = "none";
+  document.getElementById("teleop-status").textContent = "Stopped";
+}
+
+function updateTeleopUI(active, phase) {
+  const start = document.getElementById("btn-teleop-start");
+  const stop  = document.getElementById("btn-teleop-stop");
+  const lbl   = document.getElementById("teleop-status");
+  if (!start) return;
+  if (active) {
+    start.style.display = "none";
+    stop.style.display  = "";
+    if (phase === "equalizing") {
+      lbl.textContent = "Equalizing — moving follower to match leader…";
+      lbl.style.color = "#f59e0b";
+    } else {
+      lbl.textContent = "LIVE — move leader to drive follower";
+      lbl.style.color = "#4ade80";
+    }
+  } else {
+    start.style.display = "";
+    stop.style.display  = "none";
+    lbl.style.color = "#888";
+  }
 }
 
 // ---------------------------------------------------------------- //

@@ -5,7 +5,7 @@ Flask + Anthropic streaming, tool use, session memory.
 Endpoints:
   POST /session/new   → SSE: Claude opening greeting with motor status
   POST /chat          → SSE: Claude response (agentic tool loop)
-  GET  /status        → proxied motor state from :7777
+  GET  /status        → proxied motor state from :5833 (ui/app.py)
   GET  /teleop/status → teleop subprocess state
 """
 
@@ -22,7 +22,7 @@ from flask import Flask, request, Response, send_from_directory
 import anthropic
 
 # ── Config ─────────────────────────────────────────────────────────────────
-MOTOR_API   = "http://127.0.0.1:7777"
+MOTOR_API   = "http://127.0.0.1:5833"
 CAL_BASE    = Path.home() / ".cache/huggingface/lerobot/calibration"
 FOLLOWER_CAL = CAL_BASE / "robots/so_follower/my_follower.json"
 LEADER_CAL   = CAL_BASE / "teleoperators/so_leader/my_leader.json"
@@ -74,18 +74,22 @@ def fmt_positions(pos: dict) -> str:
 
 
 def live_state_summary() -> str:
-    s = motor_get("/state")
+    s = motor_get("/api/state")
     if "error" in s:
-        return f"Motor server unreachable: {s['error']}"
-    if not s.get("connected"):
-        return "Follower arm not connected (check USB/power)."
-    pos = s.get("positions", {})
-    uptime = int(time.time() - s.get("uptime_start", time.time()))
-    return (
-        f"Follower arm connected ({len(pos)}/6 motors).\n"
-        f"Positions:\n{fmt_positions(pos)}\n"
-        f"Motor server uptime: {uptime}s"
-    )
+        return f"UI server unreachable: {s['error']}"
+    conn = s.get("connection", {})
+    motors = s.get("motors", {})
+    parts = []
+    for role in ("follower", "leader"):
+        joints = motors.get(role, {})
+        connected_ports = [p for p, info in conn.items() if info.get("connected")]
+        if joints:
+            pos_lines = fmt_positions({name: d.get("position") for name, d in joints.items()})
+            temps = {name: d.get("temperature") for name, d in joints.items() if d.get("temperature")}
+            parts.append(f"{role.capitalize()} ({len(joints)}/6 motors):\n{pos_lines}")
+            if temps:
+                parts.append("  Temps: " + ", ".join(f"{n}={t}°C" for n, t in temps.items()))
+    return "\n".join(parts) if parts else "No arms connected."
 
 
 def system_prompt() -> str:
@@ -215,15 +219,10 @@ def run_tool(name: str, inp: dict) -> str:
     global teleop_proc
 
     if name == "check_motors":
-        state = motor_get("/state")
+        state = motor_get("/api/state")
         if "error" in state:
-            return f"Motor server unreachable: {state['error']}"
-        result = json.dumps(state, indent=2)
-        if inp.get("include_log"):
-            log = motor_get("/log")
-            entries = log.get("entries", [])[-10:]
-            result += f"\n\nLast {len(entries)} log entries:\n" + json.dumps(entries, indent=2)
-        return result
+            return f"UI server unreachable: {state['error']}"
+        return json.dumps(state, indent=2)
 
     elif name == "scan_motors":
         script = Path.home() / "so101/scripts/scan_motors.py"
@@ -244,36 +243,24 @@ def run_tool(name: str, inp: dict) -> str:
         with teleop_lock:
             if teleop_proc and teleop_proc.poll() is None:
                 return "Teleoperation is already running."
-            cmd = [
-                PYTHON, "-m", "lerobot.scripts.control_robot",
-                "--robot-path", "lerobot/configs/robot/so101_follower.yaml",
-                "--robot-overrides", "~robots.follower.port=/dev/tty.usbmodem5B141123331",
-                "--control.type=teleoperate",
-                "--teleop-path", "lerobot/configs/teleoperator/so101_leader.yaml",
-                "--teleop-overrides", "~teleoperators.leader.port=/dev/tty.usbmodem5B141116761",
-            ]
-            # Fallback to lerobot-teleoperate CLI
-            alt_cmd = [
-                "lerobot-teleoperate",
-                "--robot.type=so101_follower",
-                "--robot.port=/dev/tty.usbmodem5B141123331",
-                "--robot.id=my_follower",
-                "--teleop.type=so101_leader",
-                "--teleop.port=/dev/tty.usbmodem5B141116761",
-                "--teleop.id=my_leader",
-            ]
+            duration = inp.get("duration", 120)
+            script = Path.home() / "so101/scripts/teleop_6joint.py"
             env = {**os.environ, "PATH": f"/Users/dereklomas/lerobot-env-312/bin:{os.environ.get('PATH', '')}"}
             try:
                 teleop_proc = subprocess.Popen(
-                    alt_cmd, env=env,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    [PYTHON, str(script), str(duration)], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     text=True
                 )
                 time.sleep(1.5)
                 if teleop_proc.poll() is not None:
                     out = teleop_proc.stdout.read()
-                    return f"Teleoperate exited immediately:\n{out}"
-                return f"Teleoperation started (PID {teleop_proc.pid}). Leader arm now controls follower."
+                    return f"Teleop exited immediately:\n{out}"
+                return (
+                    f"Teleoperation started (PID {teleop_proc.pid}, {duration}s). "
+                    "Leader arm controls follower with proportional speed + safety limits. "
+                    "Say 'stop teleoperation' to end early."
+                )
             except Exception as e:
                 return f"Failed to start teleoperation: {e}"
 
@@ -290,27 +277,21 @@ def run_tool(name: str, inp: dict) -> str:
         return "Teleoperation stopped."
 
     elif name == "start_calibration":
-        r = motor_post("/reset_ranges")
-        if r.get("ok"):
-            return (
-                "Calibration started — ranges reset to zero.\n"
-                "Move both arms slowly through their FULL range of motion "
-                "(every joint, from minimum to maximum).\n"
-                "When done, say 'save calibration'."
-            )
-        return f"Failed to reset ranges: {r}"
+        r = motor_post("/api/cal/reset")
+        motor_post("/api/cal/start")
+        return (
+            "Calibration started — ranges reset and recording.\n"
+            "Move both arms slowly through their FULL range of motion "
+            "(every joint, from minimum to maximum).\n"
+            "When done, say 'save calibration'."
+        )
 
     elif name == "save_calibration":
-        r = motor_post("/save_calibration")
-        if r.get("ok"):
-            mins = r.get("mins", {})
-            maxs = r.get("maxs", {})
-            lines = ["Calibration saved to my_follower.json\n"]
-            for n in ["shoulder_pan", "shoulder_lift", "elbow_flex",
-                      "wrist_flex", "wrist_roll", "gripper"]:
-                lines.append(f"  {n:<16} {mins.get(n, '?'):>5} – {maxs.get(n, '?'):<5}")
-            return "\n".join(lines)
-        return f"Save failed: {r.get('error', r)}"
+        motor_post("/api/cal/stop")
+        r = motor_post("/api/cal/save")
+        if r.get("ok") or r.get("saved"):
+            return "Calibration saved to calibration JSON files."
+        return f"Save failed: {r}"
 
     elif name == "read_calibration":
         result = []
@@ -478,12 +459,14 @@ def chat():
 
 @app.route("/status")
 def status():
-    """Proxy motor state for the sidebar."""
-    s = motor_get("/state")
-    # Normalise so UI gets .connected + .positions
+    """Proxy motor state from ui/app.py for the sidebar."""
+    s = motor_get("/api/state")
+    motors = s.get("motors", {})
+    follower = motors.get("follower", {})
+    positions = {name: d.get("position") for name, d in follower.items()}
+    connected = any(info.get("connected") for info in s.get("connection", {}).values())
     return app.response_class(
-        json.dumps({"connected": s.get("connected", False),
-                    "positions": s.get("positions", {})}),
+        json.dumps({"connected": connected, "positions": positions}),
         mimetype="application/json"
     )
 

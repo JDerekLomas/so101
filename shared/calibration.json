@@ -1,0 +1,93 @@
+{
+  "updated": 1778758222.004781,
+  "updated_by": "claude-session-9",
+  "note": "Follower elbow_flex and wrist_roll recalibrated from real sweep (were 0-4095). All joints now have real measured ranges.",
+  "follower": {
+    "shoulder_pan": {
+      "id": 1,
+      "drive_mode": 0,
+      "homing_offset": -98,
+      "range_min": 917,
+      "range_max": 3660
+    },
+    "shoulder_lift": {
+      "id": 2,
+      "drive_mode": 0,
+      "homing_offset": 1545,
+      "range_min": 659,
+      "range_max": 3110
+    },
+    "elbow_flex": {
+      "id": 3,
+      "drive_mode": 0,
+      "homing_offset": -156,
+      "range_min": 24,
+      "range_max": 4051
+    },
+    "wrist_flex": {
+      "id": 4,
+      "drive_mode": 0,
+      "homing_offset": -1895,
+      "range_min": 945,
+      "range_max": 3339
+    },
+    "wrist_roll": {
+      "id": 5,
+      "drive_mode": 0,
+      "homing_offset": 1113,
+      "range_min": 27,
+      "range_max": 3892
+    },
+    "gripper": {
+      "id": 6,
+      "drive_mode": 0,
+      "homing_offset": -800,
+      "range_min": 1323,
+      "range_max": 2862
+    }
+  },
+  "leader": {
+    "shoulder_pan": {
+      "id": 1,
+      "drive_mode": 0,
+      "homing_offset": 1142,
+      "range_min": 781,
+      "range_max": 3267
+    },
+    "shoulder_lift": {
+      "id": 2,
+      "drive_mode": 0,
+      "homing_offset": -1431,
+      "range_min": 930,
+      "range_max": 3369
+    },
+    "elbow_flex": {
+      "id": 3,
+      "drive_mode": 0,
+      "homing_offset": 837,
+      "range_min": 1858,
+      "range_max": 4064
+    },
+    "wrist_flex": {
+      "id": 4,
+      "drive_mode": 0,
+      "homing_offset": 1297,
+      "range_min": 882,
+      "range_max": 3227
+    },
+    "wrist_roll": {
+      "id": 5,
+      "drive_mode": 0,
+      "homing_offset": 1841,
+      "range_min": 2,
+      "range_max": 4065
+    },
+    "gripper": {
+      "id": 6,
+      "drive_mode": 0,
+      "homing_offset": 535,
+      "range_min": 1846,
+      "range_max": 3018
+    }
+  }
+}

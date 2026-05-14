@@ -35,6 +35,7 @@ MSG_FROM_USER = SHARED_DIR / "messages" / "from_user"
 BAUDRATE             = 1_000_000
 PRESENT_POSITION_ADDR = 56
 GOAL_POSITION_ADDR   = 42
+SPEED_ADDR           = 46
 TORQUE_ENABLE_ADDR   = 40
 TEMPERATURE_ADDR     = 63
 LOAD_ADDR            = 60
@@ -42,10 +43,17 @@ PING_INTERVAL        = 0.05
 STATE_WRITE_INTERVAL = 0.5   # write shared state at 2 Hz
 AUTO_SCAN_INTERVAL   = 3.0   # check for new/gone boards every 3s
 
-# ── Safety thresholds ──────────────────────────────────────────────
-TEMP_CUTOFF_C        = 65    # °C   — disable torque above this
-STALL_LOAD_THRESHOLD = 800   # 0–1023 load — above this counts toward stall
-STALL_COUNT_LIMIT    = 6     # consecutive high-load reads to trip (~300 ms)
+# ── Safety thresholds (from shared/safety.json) ───────────────────
+SAFETY_FILE = Path(__file__).parent / "shared" / "safety.json"
+try:
+    _safety = json.loads(SAFETY_FILE.read_text())
+    TEMP_CUTOFF_C        = _safety["thresholds"]["temp_cutoff_c"]
+    STALL_LOAD_THRESHOLD = _safety["thresholds"]["stall_load_threshold"]
+    STALL_COUNT_LIMIT    = _safety["thresholds"]["stall_count_limit"]
+except Exception:
+    TEMP_CUTOFF_C        = 65
+    STALL_LOAD_THRESHOLD = 800
+    STALL_COUNT_LIMIT    = 6
 
 CAL_PATHS = {
     "follower": Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
@@ -64,11 +72,27 @@ ID_NAMES = {
 state_lock      = threading.Lock()
 boards          = {}   # port -> {ph, handler, ids, positions, temps, loads, errors, label}
 assignment      = {}   # "leader"/"follower" -> port
+move_grace      = {}   # motor_id -> timestamp — suppress stall detection until this time
+MOVE_GRACE_S    = 2.0  # seconds to suppress stall detection after a commanded move
 cal_active      = False
 cal_ranges      = {}   # role -> {motor_id -> {min, max}}
 event_log       = []   # recent events, capped at 50
 notifications   = []   # messages shown in UI, capped at 20
 empty_ports     = set()  # USB ports that are connected but have no motors (don't re-probe every 3s)
+teleop_active      = False
+teleop_equalizing  = False  # True during startup equalization phase
+teleop_eq_targets  = {}     # {motor_id: target} — snapshot of leader pos at start
+teleop_cal         = {}     # loaded once on start: {"leader": {...}, "follower": {...}}
+teleop_positions   = {}     # {motor_id: current_sent_position} — used for ramp-limiting
+
+# Max counts to move per poll cycle (20 Hz). 60 counts/step = 1200 counts/s ≈ 3.4 s full sweep.
+TELEOP_MAX_DELTA   = 60
+TELEOP_EQ_THRESH   = 25    # counts — follower must be within this of target to end equalization
+
+# Proportional speed control for teleop (matches teleop_6joint.py)
+TELEOP_SPEED_K     = 1.2   # speed units per count of error
+TELEOP_SPEED_MIN   = 80    # minimum speed (keeps motion smooth near target)
+TELEOP_SPEED_MAX   = 500   # maximum speed (prevents violent motion)
 
 
 # ------------------------------------------------------------------ #
@@ -118,12 +142,15 @@ def ping_ids(ph, handler):
     return found
 
 
-def read_register(ph, handler, mid, addr, length=2):
-    if length == 1:
-        val, result, _ = handler.read1ByteTxRx(ph, mid, addr)
-    else:
-        val, result, _ = handler.read2ByteTxRx(ph, mid, addr)
-    return val if result == 0 else None
+def read_register(ph, handler, mid, addr, length=2, retries=3):
+    for _ in range(retries):
+        if length == 1:
+            val, result, _ = handler.read1ByteTxRx(ph, mid, addr)
+        else:
+            val, result, _ = handler.read2ByteTxRx(ph, mid, addr)
+        if result == 0:
+            return val
+    return None
 
 
 def write_register(ph, handler, mid, addr, value, length=2):
@@ -132,6 +159,28 @@ def write_register(ph, handler, mid, addr, value, length=2):
     else:
         result, _ = handler.write2ByteTxRx(ph, mid, addr, value)
     return result == 0
+
+
+def _load_teleop_cal():
+    """Load both cal files for position mapping. Returns {role: {name: {...}}}."""
+    result = {}
+    for role, path in CAL_PATHS.items():
+        try:
+            result[role] = json.loads(path.read_text())
+        except Exception:
+            pass
+    return result
+
+
+def _map_position(leader_raw, lc, fc):
+    """Linear map from leader cal range to follower cal range, clamped."""
+    l_min, l_max = lc["range_min"], lc["range_max"]
+    f_min, f_max = fc["range_min"], fc["range_max"]
+    if l_max <= l_min:
+        return (f_min + f_max) // 2
+    t = (leader_raw - l_min) / (l_max - l_min)
+    t = max(0.0, min(1.0, t))
+    return round(f_min + t * (f_max - f_min))
 
 
 def _load_cal_limits(role):
@@ -171,6 +220,18 @@ def _check_safety(board, path, pending_events):
             continue  # skip stall check for this motor
 
         # ── 2. Stall detection ───────────────────────────────────────
+        # Skip stall trips while teleop is active — position tracking causes
+        # brief high load that should not be treated as a stall.
+        if teleop_active and board.get("label") == "follower":
+            board["stall_counts"][mid] = 0
+            continue
+
+        # Skip stall detection during move grace period (P5: allow recovery
+        # from stalled positions — motor needs time to push through high-load zone)
+        if move_grace.get(mid, 0) > time.time():
+            board["stall_counts"][mid] = 0
+            continue
+
         load = board["loads"].get(mid)
         if load is None:
             # Comm error — reset counter (don't false-trip on packet loss)
@@ -279,6 +340,68 @@ def poll_loop():
                 except Exception:
                     pass
 
+            # ── Teleop: mirror leader -> follower at 20 Hz ───────────
+            if teleop_active:
+                l_port = assignment.get("leader")
+                f_port = assignment.get("follower")
+                if l_port and f_port and l_port in boards and f_port in boards:
+                    l_board = boards[l_port]
+                    f_board = boards[f_port]
+                    lc_map  = teleop_cal.get("leader",   {})
+                    fc_map  = teleop_cal.get("follower", {})
+                    ph      = f_board["ph"]
+                    handler = f_board["handler"]
+                    all_equalized = True
+                    for mid in f_board["ids"]:
+                        # Clear any stall trip so all motors stay active during teleop
+                        if f_board["safety_disabled"].get(mid):
+                            f_board["safety_disabled"][mid] = False
+                            f_board["stall_counts"][mid]    = 0
+                            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+                        name = ID_NAMES.get(mid)
+                        if not name:
+                            continue
+                        lc = lc_map.get(name)
+                        fc = fc_map.get(name)
+                        if lc is None or fc is None:
+                            continue
+
+                        if teleop_equalizing:
+                            # Phase 1: ramp toward snapshot of leader position at start
+                            target = teleop_eq_targets.get(mid)
+                            if target is None:
+                                continue
+                            prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
+                            delta = target - prev
+                            if abs(delta) > TELEOP_MAX_DELTA:
+                                target = prev + TELEOP_MAX_DELTA * (1 if delta > 0 else -1)
+                                all_equalized = False
+                            elif abs(target - f_board["positions"].get(mid, target)) > TELEOP_EQ_THRESH:
+                                all_equalized = False
+                        else:
+                            # Phase 2: live tracking
+                            l_raw = l_board["positions"].get(mid)
+                            if l_raw is None:
+                                continue
+                            target = _map_position(l_raw, lc, fc)
+                            prev = teleop_positions.get(mid, f_board["positions"].get(mid, target))
+                            delta = target - prev
+                            if abs(delta) > TELEOP_MAX_DELTA:
+                                target = prev + TELEOP_MAX_DELTA * (1 if delta > 0 else -1)
+
+                        teleop_positions[mid] = target
+                        # Proportional speed: servo moves fast when far, slow when close
+                        current_pos = f_board["positions"].get(mid, target)
+                        error = abs(target - current_pos)
+                        speed = int(max(TELEOP_SPEED_MIN, min(TELEOP_SPEED_MAX, TELEOP_SPEED_K * error)))
+                        write_register(ph, handler, mid, SPEED_ADDR, speed, length=2)
+                        write_register(ph, handler, mid, GOAL_POSITION_ADDR, target, length=2)
+
+                    # Transition out of equalization once all motors are close
+                    if teleop_equalizing and all_equalized:
+                        teleop_equalizing = False
+                        pending_events.append(("teleop_tracking", {}))
+
         # Push safety events outside state_lock (push_event acquires it)
         for kind, detail in pending_events:
             push_event(kind, detail)
@@ -292,6 +415,13 @@ def poll_loop():
         _process_messages()
 
         time.sleep(PING_INTERVAL)
+
+
+def _restore_labels():
+    """Re-apply assignment labels to boards after a rescan. Call inside state_lock."""
+    for role, port in assignment.items():
+        if port in boards:
+            boards[port]["label"] = role
 
 
 def _auto_scan():
@@ -341,6 +471,8 @@ def _auto_scan():
                     "errors":    0,
                     "label":     None,
                 }
+            with state_lock:
+                _restore_labels()
             push_event("connected", {"port": path, "motor_count": len(ids)})
         else:
             ph.closePort()
@@ -386,6 +518,7 @@ def _write_shared_state():
             "connection": conn,
             "motors": motors_out,
             "calibration": cal_copy,
+            "teleop_active": teleop_active,
             "events": events_copy,
         }
         # Atomic write via temp file
@@ -442,6 +575,7 @@ def _handle_message(msg):
                 except Exception:
                     pass
             boards = scan_boards()
+            _restore_labels()
         push_event("scan_complete", {"board_count": len(boards)})
 
     elif msg_type == "calibrate_start":
@@ -495,7 +629,7 @@ def stream():
                 events = list(event_log[-5:])
                 notifs = [n for n in notifications if not n.get("dismissed")]
                 empty  = list(empty_ports)
-            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty})}\n\n"
+            yield f"data: {json.dumps({'boards': snapshot, 'cal': cal_snap, 'events': events, 'notifications': notifs, 'empty_ports': empty, 'teleop': teleop_active, 'teleop_phase': 'equalizing' if teleop_equalizing else 'tracking'})}\n\n"
             time.sleep(0.1)
 
     return Response(generate(), mimetype="text/event-stream",
@@ -560,6 +694,7 @@ def api_rescan():
             except Exception:
                 pass
         boards = scan_boards()
+        _restore_labels()
     push_event("scan_complete", {"board_count": len(boards)})
     return jsonify({"ok": True, "count": len(boards)})
 
@@ -645,6 +780,7 @@ def api_notify_action():
                 try: board["ph"].closePort()
                 except Exception: pass
             boards = scan_boards()
+            _restore_labels()
         push_event("scan_complete", {"board_count": len(boards)})
 
     # Write response to from_user/ for Claude to read
@@ -823,6 +959,67 @@ def api_move():
     if board is None:
         return jsonify({"error": f"no board found for label '{label}'"}), 404
 
+    ramped = data.get("ramped", False)
+
+    # Set move grace period — suppress stall detection while motor escapes high-load zone
+    grace_until = time.time() + MOVE_GRACE_S
+    for mid in positions:
+        move_grace[mid] = grace_until
+
+    if ramped:
+        # P1: No teleport — ramp toward targets in background thread
+        def _ramped_move():
+            with state_lock:
+                ph, handler = board["ph"], board["handler"]
+                for mid in positions:
+                    if mid in board["ids"]:
+                        board["safety_disabled"][mid] = False
+                        board["stall_counts"][mid]    = 0
+                        write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+
+            max_delta = TELEOP_MAX_DELTA  # counts per cycle
+            remaining = dict(positions)   # {mid: final_goal}
+            sent      = {}               # {mid: last_sent_position}
+
+            # Read current positions as starting points
+            with state_lock:
+                for mid in remaining:
+                    sent[mid] = board["positions"].get(mid, remaining[mid])
+
+            for _ in range(200):  # max 200 cycles = 10s at 20Hz
+                if not remaining:
+                    break
+                done = []
+                with state_lock:
+                    ph, handler = board["ph"], board["handler"]
+                    for mid, goal in remaining.items():
+                        current = sent[mid]
+                        delta = goal - current
+                        if abs(delta) <= 2:  # deadband
+                            done.append(mid)
+                            continue
+                        step = max(-max_delta, min(max_delta, delta))
+                        next_pos = current + step
+                        write_register(ph, handler, mid, GOAL_POSITION_ADDR, next_pos, length=2)
+                        sent[mid] = next_pos
+                for mid in done:
+                    del remaining[mid]
+                time.sleep(PING_INTERVAL)
+
+            # Disable torque after settling
+            time.sleep(0.5)
+            with state_lock:
+                ph, handler = board["ph"], board["handler"]
+                for mid in positions:
+                    if mid in board["ids"]:
+                        write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+            push_event("move_complete", {"label": label, "positions": positions, "ramped": True})
+
+        threading.Thread(target=_ramped_move, daemon=True).start()
+        push_event("move_start", {"label": label, "positions": positions, "ramped": True})
+        return jsonify({"status": "ramping", "positions": positions})
+
+    # Legacy: instant move (no ramping)
     results = {}
     with state_lock:
         ph, handler = board["ph"], board["handler"]
@@ -830,7 +1027,6 @@ def api_move():
             if mid not in board["ids"]:
                 results[mid] = "skipped (not found)"
                 continue
-            # Clear any previous safety trip so this explicit command goes through
             board["safety_disabled"][mid] = False
             board["stall_counts"][mid]    = 0
             write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
@@ -850,6 +1046,70 @@ def api_move():
 
     push_event("move_start", {"label": label, "positions": positions})
     return jsonify({"status": "moving", "results": results, "positions": positions})
+
+
+# ------------------------------------------------------------------ #
+# Routes — teleoperation                                              #
+# ------------------------------------------------------------------ #
+
+@app.route("/api/teleop/start", methods=["POST"])
+def api_teleop_start():
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions
+    cal = _load_teleop_cal()
+    if "leader" not in cal or "follower" not in cal:
+        return jsonify({"error": "calibration files missing for leader or follower"}), 400
+    with state_lock:
+        f_port = assignment.get("follower")
+        l_port = assignment.get("leader")
+        if not f_port or f_port not in boards:
+            return jsonify({"error": "follower not connected"}), 400
+        if not l_port or l_port not in boards:
+            return jsonify({"error": "leader not connected"}), 400
+        f_board = boards[f_port]
+        l_board = boards[l_port]
+        ph, handler = f_board["ph"], f_board["handler"]
+        for mid in f_board["ids"]:
+            f_board["safety_disabled"][mid] = False
+            f_board["stall_counts"][mid]    = 0
+            write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 1, length=1)
+        # Seed ramp from current follower positions
+        teleop_positions = dict(f_board["positions"])
+        # Snapshot leader positions mapped to follower — equalization target
+        lc_map = cal.get("leader", {})
+        fc_map = cal.get("follower", {})
+        eq_targets = {}
+        for mid in f_board["ids"]:
+            name = ID_NAMES.get(mid)
+            if not name:
+                continue
+            lc = lc_map.get(name)
+            fc = fc_map.get(name)
+            l_raw = l_board["positions"].get(mid)
+            if lc and fc and l_raw is not None:
+                eq_targets[mid] = _map_position(l_raw, lc, fc)
+        teleop_eq_targets  = eq_targets
+        teleop_equalizing  = True
+        teleop_cal         = cal
+        teleop_active      = True
+    push_event("teleop_started", {"phase": "equalizing"})
+    return jsonify({"ok": True, "phase": "equalizing"})
+
+
+@app.route("/api/teleop/stop", methods=["POST"])
+def api_teleop_stop():
+    global teleop_active
+    with state_lock:
+        teleop_active = False
+        f_port = assignment.get("follower")
+        if f_port and f_port in boards:
+            f_board = boards[f_port]
+            ph, handler = f_board["ph"], f_board["handler"]
+            for mid in f_board["ids"]:
+                # Reset speed to safe default before disabling torque
+                write_register(ph, handler, mid, SPEED_ADDR, TELEOP_SPEED_MIN, length=2)
+                write_register(ph, handler, mid, TORQUE_ENABLE_ADDR, 0, length=1)
+    push_event("teleop_stopped", {})
+    return jsonify({"ok": True})
 
 
 # ------------------------------------------------------------------ #

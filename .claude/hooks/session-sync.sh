@@ -24,7 +24,12 @@ echo ""
 
 echo "=== INSTRUCTIONS ==="
 echo "You are working on the SO-101 robot arm project. Read the session log above for accumulated learnings."
-echo "Before ending a session, append a new line to session_log.jsonl with your learnings, artifacts, and open questions."
+echo ""
+echo "MANDATORY before ending a session:"
+echo "1. Append a JSON line to session_log.jsonl: {\"session\": N, \"date\": \"YYYY-MM-DD\", \"learnings\": [...], \"artifacts\": [...], \"open_questions\": [...]}"
+echo "2. Append a handoff note to mailbox.json with your summary."
+echo "3. Check teleop_active status before issuing any move commands."
+echo ""
 echo "Knowledge base: ~/so101/so101_knowledge_base.md"
 echo "Paper outline: ~/so101/paper/outline.md"
 
