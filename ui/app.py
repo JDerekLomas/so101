@@ -290,7 +290,7 @@ def scan_boards():
 
 def poll_loop():
     """Read positions, temps, loads from all boards continuously."""
-    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions
+    global teleop_active, teleop_equalizing, teleop_eq_targets, teleop_cal, teleop_positions, teleop_prev_pos, teleop_halted
     last_state_write = 0
     last_auto_scan   = 0
     last_tl_read     = 0   # last time we read temps+loads
@@ -302,7 +302,10 @@ def poll_loop():
         # Auto-scan: detect boards appearing or disappearing
         if now - last_auto_scan >= AUTO_SCAN_INTERVAL:
             last_auto_scan = now
-            _auto_scan()
+            try:
+                _auto_scan()
+            except Exception:
+                pass  # SerialException during teleop — don't kill the thread
 
         do_tl = (now - last_tl_read >= 0.25)  # temps+loads at ~4 Hz
         if do_tl:
@@ -333,8 +336,8 @@ def poll_loop():
                         # Safety checks run right after fresh temp+load data
                         _check_safety(board, path, pending_events)
 
-                    # Calibration range tracking
-                    if cal_active and board["label"] in ("leader", "follower"):
+                    # Calibration range tracking — always on
+                    if board["label"] in ("leader", "follower"):
                         role = board["label"]
                         if role not in cal_ranges:
                             cal_ranges[role] = {}
@@ -619,16 +622,13 @@ def _handle_message(msg):
         push_event("scan_complete", {"board_count": len(boards)})
 
     elif msg_type == "calibrate_start":
-        global cal_active, cal_ranges
+        global cal_ranges
         with state_lock:
-            cal_active = True
             cal_ranges = {}
         push_event("calibration_started", {})
 
     elif msg_type == "calibrate_stop":
-        with state_lock:
-            cal_active = False
-        push_event("calibration_stopped", {})
+        pass  # calibration tracking is always on
 
 
 # ------------------------------------------------------------------ #
@@ -660,7 +660,7 @@ def stream():
                         "ids":       board["ids"],
                     }
                 cal_snap = {
-                    "active": cal_active,
+                    "active": True,  # always-on calibration tracking
                     "ranges": {
                         role: {str(mid): r for mid, r in motors.items()}
                         for role, motors in cal_ranges.items()
@@ -804,15 +804,12 @@ def api_notify_action():
 
     # Handle built-in triggers directly
     if trigger == "cal_start":
-        global cal_active, cal_ranges
+        global cal_ranges
         with state_lock:
-            cal_active = True
             cal_ranges = {}
         push_event("calibration_started", {"source": "notification"})
     elif trigger == "cal_stop":
-        with state_lock:
-            cal_active = False
-        push_event("calibration_stopped", {"source": "notification"})
+        pass  # calibration tracking is always on
     elif trigger == "rescan":
         global boards
         with state_lock:
@@ -868,12 +865,11 @@ def api_notify_responses_clear():
 
 @app.route("/api/cal/start", methods=["POST"])
 def api_cal_start():
-    global cal_active, cal_ranges
+    global cal_ranges
     with state_lock:
-        cal_active = True
         cal_ranges = {}
     push_event("calibration_started", {})
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "note": "Ranges reset. Calibration tracking is always on."})
 
 
 @app.route("/api/cal/reset", methods=["POST"])
@@ -886,17 +882,13 @@ def api_cal_reset():
 
 @app.route("/api/cal/stop", methods=["POST"])
 def api_cal_stop():
-    global cal_active
-    with state_lock:
-        cal_active = False
-    return jsonify({"ok": True})
+    # No-op — calibration tracking is always on. Use /api/cal/reset to clear ranges.
+    return jsonify({"ok": True, "note": "Calibration tracking is always on. Use /api/cal/reset to clear."})
 
 
 @app.route("/api/cal/save", methods=["POST"])
 def api_cal_save():
-    global cal_active
     with state_lock:
-        cal_active = False
         ranges_copy = {r: {mid: dict(v) for mid, v in motors.items()}
                        for r, motors in cal_ranges.items()}
 
@@ -1019,12 +1011,6 @@ def api_move():
 
             max_delta = TELEOP_MAX_DELTA  # counts per cycle
             remaining = dict(positions)   # {mid: final_goal}
-            sent      = {}               # {mid: last_sent_position}
-
-            # Read current positions as starting points
-            with state_lock:
-                for mid in remaining:
-                    sent[mid] = board["positions"].get(mid, remaining[mid])
 
             for _ in range(200):  # max 200 cycles = 10s at 20Hz
                 if not remaining:
@@ -1033,7 +1019,8 @@ def api_move():
                 with state_lock:
                     ph, handler = board["ph"], board["handler"]
                     for mid, goal in remaining.items():
-                        current = sent[mid]
+                        # P2: read actual position each cycle (poll loop updates at 20Hz)
+                        current = board["positions"].get(mid, goal)
                         delta = goal - current
                         if abs(delta) <= 2:  # deadband
                             done.append(mid)
@@ -1041,7 +1028,6 @@ def api_move():
                         step = max(-max_delta, min(max_delta, delta))
                         next_pos = current + step
                         write_register(ph, handler, mid, GOAL_POSITION_ADDR, next_pos, length=2)
-                        sent[mid] = next_pos
                 for mid in done:
                     del remaining[mid]
                 time.sleep(PING_INTERVAL)
@@ -1119,7 +1105,9 @@ def api_teleop_start():
         # Snapshot leader positions mapped to follower — equalization target
         lc_map = cal.get("leader", {})
         fc_map = cal.get("follower", {})
-        eq_targets = {}
+        eq_targets  = {}
+        large_gaps  = {}  # {mid: gap} — joints too far to equalize automatically
+        EQ_MAX_GAP  = 600  # counts — above this, joint is skipped during equalization
         for mid in f_board["ids"]:
             name = ID_NAMES.get(mid)
             if not name:
@@ -1128,13 +1116,22 @@ def api_teleop_start():
             fc = fc_map.get(name)
             l_raw = l_board["positions"].get(mid)
             if lc and fc and l_raw is not None:
-                eq_targets[mid] = _map_position(l_raw, lc, fc)
+                target = _map_position(l_raw, lc, fc)
+                f_now  = f_board["positions"].get(mid, target)
+                gap    = abs(f_now - target)
+                if gap > EQ_MAX_GAP:
+                    large_gaps[mid] = gap
+                    teleop_halted.add(mid)  # skip this joint — user must position manually
+                else:
+                    eq_targets[mid] = target
         teleop_eq_targets  = eq_targets
         teleop_equalizing  = True
         teleop_cal         = cal
         teleop_active      = True
-    push_event("teleop_started", {"phase": "equalizing"})
-    return jsonify({"ok": True, "phase": "equalizing"})
+    skipped = {ID_NAMES.get(mid, mid): gap for mid, gap in large_gaps.items()}
+    push_event("teleop_started", {"phase": "equalizing", "skipped": skipped})
+    return jsonify({"ok": True, "phase": "equalizing", "skipped": skipped,
+                    "note": f"Joints with gap > {EQ_MAX_GAP} skipped (position manually): {list(skipped.keys())}" if skipped else "all joints equalizing"})
 
 
 @app.route("/api/teleop/stop", methods=["POST"])
