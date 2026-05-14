@@ -10,7 +10,11 @@
     "P6_equalize_before_track": "Before starting teleop, move follower to match leader position at safe speed. Never start tracking from an unknown state.",
     "P7_human_in_the_loop": "Notify the user on any safety trip, unusual state, or before large moves (>500 counts from current position).",
     "P8_collision_freeze": "If follower motor load exceeds collision threshold during teleop, freeze that joint at current position. Unfreeze only when load drops below retreat threshold. Never push through resistance.",
-    "P9_workspace_aware": "Use probed workspace limits (from auto-calibrate and workspace probe) to constrain motion beyond calibration. The robot learns its environment through force feedback and enforces those limits in all move paths."
+    "P9_workspace_aware": "Use probed workspace limits (from auto-calibrate and workspace probe) to constrain motion beyond calibration. The robot learns its environment through force feedback and enforces those limits in all move paths.",
+    "P10_adaptive_gain": "Proportional gain K adjusts dynamically per joint based on tracking error history. Grows when the follower falls behind (sustained error), decays when error is small. Prevents both sluggish tracking and aggressive overshoot.",
+    "P11_predictive_collision": "Track load derivative (slope) to detect rising forces before they spike. Preemptively slow the joint when load is rising fast and predicted to cross 70% of collision threshold within 250ms.",
+    "P12_fatigue_aware": "Cumulative thermal stress derates collision thresholds. A motor that has been running hot trips earlier, protecting against torque loss under thermal stress. Heat integral decays when cool.",
+    "P13_bidirectional_learning": "Collision learning is not one-way. After sustained collision-free operation (2000+ cycles), cautiously loosen tightened calibration limits. Allows the robot to recover range after being moved to a new workspace."
   },
 
   "thresholds": {
@@ -35,6 +39,32 @@
     "torque_off_delay_s": 2.5,
     "equalization_tolerance": 25,
     "equalization_timeout_s": 6
+  },
+
+  "cybernetics": {
+    "_doc": "Parameters for the adaptive intelligence layer (P10-P13).",
+    "adaptive_gain": {
+      "window_cycles": 40,
+      "k_min": 0.6,
+      "k_max": 2.5,
+      "grow_rate": 0.02,
+      "decay_rate": 0.05
+    },
+    "predictive_collision": {
+      "horizon_cycles": 5,
+      "load_slope_threshold": 40,
+      "early_warning_fraction": 0.7
+    },
+    "fatigue": {
+      "temp_baseline_c": 30,
+      "temp_scale_c": 40,
+      "load_derating_min": 0.7,
+      "heat_integral_max": 500
+    },
+    "bidirectional_learning": {
+      "loosen_min_cycles": 2000,
+      "loosen_step_counts": 20
+    }
   },
 
   "lag": {

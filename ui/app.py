@@ -105,6 +105,22 @@ teleop_resync      = {}     # {motor_id: hold_position} — joints waiting for l
 teleop_slow_mode   = False  # True = conservative limits for initial exploration
 teleop_log         = []     # rolling buffer of teleop cycle snapshots
 
+# ── Cybernetic intelligence state ──────────────────────────────────
+# Per-joint adaptive gain: tracks error history and adjusts K dynamically
+teleop_adaptive_k  = {}     # mid -> current K value (float)
+teleop_error_hist  = {}     # mid -> deque of recent tracking errors (ints)
+
+# Predictive collision: tracks load slope to detect impacts before they spike
+teleop_load_hist   = {}     # mid -> deque of recent load values
+teleop_predicted   = {}     # mid -> True if predictive slowdown is active
+
+# Fatigue model: per-joint cumulative thermal stress tracking
+motor_fatigue      = {}     # mid -> {"heat_integral": float, "derating": float}
+# heat_integral = running sum of (temp - baseline) * dt, decays when cool
+
+# Collision-free cycle counter for bidirectional learning
+collision_free_cycles = {}  # mid -> int cycles since last collision
+
 # Camera state
 camera_frame      = None   # latest JPEG bytes
 camera_lock       = threading.Lock()
@@ -131,6 +147,27 @@ TELEOP_SPEED_MAX   = 800   # maximum speed (tracks fast leader movements)
 TELEOP_SLOW_MAX_DELTA  = 15   # counts/cycle → ~300 counts/s = very slow sweep
 TELEOP_SLOW_SPEED_MIN  = 30
 TELEOP_SLOW_SPEED_MAX  = 100
+
+# ── Cybernetic intelligence constants ──────────────────────────────
+# Adaptive gain: K adjusts based on recent tracking error history
+ADAPT_GAIN_WINDOW    = 40     # cycles to look back for gain adaptation (~2s)
+ADAPT_K_MIN          = 0.6    # minimum proportional gain (gentle)
+ADAPT_K_MAX          = 2.5    # maximum proportional gain (aggressive catch-up)
+ADAPT_K_GROW_RATE    = 0.02   # per cycle when error persists
+ADAPT_K_DECAY_RATE   = 0.05   # per cycle when error shrinks (fast cooldown)
+
+# Predictive collision: estimate time-to-collision from velocity + position
+PREDICT_HORIZON_CYCLES = 5    # look-ahead cycles (~250ms at 20Hz)
+PREDICT_LOAD_SLOPE_THRESH = 40  # load increase per cycle that triggers early warning
+
+# Fatigue model: motors that run hot lose torque capacity
+FATIGUE_TEMP_BASELINE  = 30   # below this, no fatigue factor
+FATIGUE_TEMP_SCALE     = 40   # temp above which fatigue factor = 0.5
+FATIGUE_LOAD_DERATING  = 0.7  # at max fatigue, collision threshold * this
+
+# Bidirectional collision learning: can loosen limits over time
+CAL_LOOSEN_MIN_CYCLES  = 2000  # cycles without collision before considering loosening
+CAL_LOOSEN_STEP        = 20    # counts to loosen per episode
 
 
 # ------------------------------------------------------------------ #
@@ -449,6 +486,178 @@ def scan_boards():
 
 
 # ------------------------------------------------------------------ #
+# Cybernetic intelligence layer                                       #
+# ------------------------------------------------------------------ #
+
+from collections import deque
+
+def _adapt_gain(mid, tracking_error):
+    """Adaptive gain: K grows when error persists, decays when error shrinks.
+
+    If the follower keeps falling behind (sustained error), K ramps up
+    so it commands higher speed. When error is small, K decays back
+    toward baseline so motion stays smooth near the target.
+
+    Returns the adapted K value for this joint this cycle.
+    """
+    if mid not in teleop_adaptive_k:
+        teleop_adaptive_k[mid] = TELEOP_SPEED_K  # start at default
+        teleop_error_hist[mid] = deque(maxlen=ADAPT_GAIN_WINDOW)
+
+    teleop_error_hist[mid].append(tracking_error)
+    k = teleop_adaptive_k[mid]
+
+    if len(teleop_error_hist[mid]) >= 5:
+        avg_recent = sum(list(teleop_error_hist[mid])[-5:]) / 5
+        avg_old = sum(teleop_error_hist[mid]) / len(teleop_error_hist[mid])
+
+        if avg_recent > avg_old * 1.2 and avg_recent > 20:
+            # Error growing or sustained — increase gain
+            k = min(ADAPT_K_MAX, k + ADAPT_K_GROW_RATE)
+        elif avg_recent < 15:
+            # Error small — decay toward baseline
+            k = max(ADAPT_K_MIN, k - ADAPT_K_DECAY_RATE)
+
+    teleop_adaptive_k[mid] = k
+    return k
+
+
+def _predict_collision(mid, current_load, current_pos, target_pos):
+    """Predictive collision: detect rising load slope before it spikes.
+
+    Instead of waiting for load > 350, track the load derivative.
+    If load is rising fast AND position is moving toward the load source,
+    preemptively slow down.
+
+    Returns: (should_slow, predicted_load) tuple.
+    """
+    if mid not in teleop_load_hist:
+        teleop_load_hist[mid] = deque(maxlen=10)
+
+    teleop_load_hist[mid].append(current_load if current_load is not None else 0)
+
+    if len(teleop_load_hist[mid]) < 3:
+        return False, 0
+
+    hist = list(teleop_load_hist[mid])
+    # Load slope: average change over last 3 readings
+    slope = (hist[-1] - hist[-3]) / 2.0
+
+    # Predict load at horizon
+    predicted = hist[-1] + slope * PREDICT_HORIZON_CYCLES
+
+    if slope > PREDICT_LOAD_SLOPE_THRESH and predicted > COLLISION_LOAD_THRESHOLD * 0.7:
+        # Load rising fast and will cross ~70% of collision threshold
+        teleop_predicted[mid] = True
+        return True, int(predicted)
+
+    # Clear prediction when load is stable/falling
+    if mid in teleop_predicted and slope <= 0:
+        del teleop_predicted[mid]
+
+    return False, int(predicted)
+
+
+def _update_fatigue(mid, temp, dt=0.05):
+    """Fatigue model: track cumulative thermal stress per motor.
+
+    Motors that run hot have reduced torque capacity. The fatigue model
+    integrates temperature over time and derates collision thresholds
+    so a warm motor gets protected earlier.
+
+    Returns: derating factor (1.0 = healthy, 0.7 = fatigued)
+    """
+    if mid not in motor_fatigue:
+        motor_fatigue[mid] = {"heat_integral": 0.0, "derating": 1.0}
+
+    f = motor_fatigue[mid]
+
+    if temp is not None and temp > FATIGUE_TEMP_BASELINE:
+        # Accumulate heat stress
+        excess = temp - FATIGUE_TEMP_BASELINE
+        f["heat_integral"] += excess * dt
+    else:
+        # Cool down: decay heat integral
+        f["heat_integral"] = max(0, f["heat_integral"] - 2.0 * dt)
+
+    # Derating curve: linear from 1.0 at zero integral to FATIGUE_LOAD_DERATING
+    # at high integral. Integral of ~500 = 10s at 80°C (50° excess × 10s)
+    stress_fraction = min(1.0, f["heat_integral"] / 500.0)
+    f["derating"] = 1.0 - stress_fraction * (1.0 - FATIGUE_LOAD_DERATING)
+
+    return f["derating"]
+
+
+def _get_effective_collision_threshold(mid):
+    """Collision threshold adjusted for fatigue. A warm motor trips earlier."""
+    derating = motor_fatigue.get(mid, {}).get("derating", 1.0)
+    return int(COLLISION_LOAD_THRESHOLD * derating)
+
+
+def _loosen_collision_limits(mid, joint_name):
+    """Bidirectional collision learning: cautiously loosen limits after
+    sustained collision-free operation.
+
+    If a joint runs for CAL_LOOSEN_MIN_CYCLES without any collision,
+    nudge the calibration range outward by CAL_LOOSEN_STEP counts.
+    This lets the robot recover range after being moved to a new workspace.
+    """
+    global teleop_cal
+
+    cycles = collision_free_cycles.get(mid, 0)
+    if cycles < CAL_LOOSEN_MIN_CYCLES:
+        return
+
+    cal_file = CAL_PATHS.get("follower")
+    if not cal_file or not cal_file.exists():
+        return
+    try:
+        cal = json.loads(cal_file.read_text())
+        if joint_name not in cal:
+            return
+        entry = cal[joint_name]
+
+        # Compare with always-on observed ranges
+        role_ranges = cal_ranges.get("follower", {})
+        mid_int = int(mid)
+        observed = role_ranges.get(mid_int, {})
+        obs_min = observed.get("min", entry["range_min"])
+        obs_max = observed.get("max", entry["range_max"])
+
+        changed = False
+        # Only loosen if observed range exceeds current cal range
+        # (meaning the motor has physically been seen at positions
+        # outside the collision-tightened range)
+        if obs_min < entry["range_min"]:
+            new_min = max(obs_min, entry["range_min"] - CAL_LOOSEN_STEP)
+            if new_min < entry["range_min"]:
+                entry["range_min"] = new_min
+                changed = True
+        if obs_max > entry["range_max"]:
+            new_max = min(obs_max, entry["range_max"] + CAL_LOOSEN_STEP)
+            if new_max > entry["range_max"]:
+                entry["range_max"] = new_max
+                changed = True
+
+        if changed:
+            cal_file.write_text(json.dumps(cal, indent=2))
+            # Update in-memory
+            with state_lock:
+                if "follower" in teleop_cal and joint_name in teleop_cal["follower"]:
+                    teleop_cal["follower"][joint_name]["range_min"] = entry["range_min"]
+                    teleop_cal["follower"][joint_name]["range_max"] = entry["range_max"]
+            collision_free_cycles[mid] = 0  # reset counter
+            push_event("cal_limit_loosened", {
+                "joint": joint_name,
+                "new_min": entry["range_min"],
+                "new_max": entry["range_max"],
+                "cycles_clean": cycles,
+            })
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------ #
 # Adaptive calibration learning                                       #
 # ------------------------------------------------------------------ #
 
@@ -621,6 +830,10 @@ def poll_loop():
                             if l is not None:
                                 board["loads"][mid] = l & 0x03FF
 
+                        # Fatigue model: update thermal stress for each motor
+                        for mid in ids:
+                            _update_fatigue(mid, board["temps"].get(mid), dt=0.25)
+
                         # Safety checks run right after fresh temp+load data
                         _check_safety(board, path, pending_events)
 
@@ -708,10 +921,33 @@ def poll_loop():
                             continue
 
                         # ── Collision detection: freeze joint if load too high ──
-                        # Use higher threshold during equalization (gravity + ramp),
-                        # normal threshold during live tracking.
+                        # Fatigue-adjusted threshold: warm motors trip earlier.
+                        # Higher threshold during equalization (gravity + ramp).
                         f_load = f_board["loads"].get(mid)
-                        col_thresh = COLLISION_LOAD_THRESHOLD * 2 if teleop_equalizing else COLLISION_LOAD_THRESHOLD
+                        base_thresh = _get_effective_collision_threshold(mid)
+                        col_thresh = base_thresh * 2 if teleop_equalizing else base_thresh
+
+                        # Predictive collision: detect rising load slope before spike
+                        cur_target = teleop_eq_targets.get(mid) if teleop_equalizing else None
+                        if cur_target is None:
+                            l_raw_pred = l_board["positions"].get(mid)
+                            if l_raw_pred is not None and lc and fc:
+                                cur_target = _map_position(l_raw_pred, lc, fc)
+                        should_slow, predicted_load = _predict_collision(
+                            mid, f_load,
+                            f_board["positions"].get(mid, 0),
+                            cur_target or 0)
+                        if should_slow and mid not in teleop_collision:
+                            # Preemptive slowdown: halve max_delta for this joint
+                            max_delta = max(5, max_delta // 2)
+                            if mid not in teleop_predicted:
+                                teleop_predicted[mid] = True
+                                pending_events.append(("predictive_slowdown", {
+                                    "motor": mid, "name": name,
+                                    "load": f_load, "predicted": predicted_load,
+                                    "threshold": col_thresh,
+                                }))
+
                         if f_load is not None and f_load > col_thresh:
                             if mid not in teleop_collision:
                                 frozen_pos = f_board["positions"].get(mid, teleop_positions.get(mid, 0))
@@ -797,7 +1033,7 @@ def poll_loop():
                         teleop_positions[mid] = target
                         goals[mid] = int(target)
 
-                    # ── Proportional speed per joint ─────────────────────────
+                    # ── Adaptive proportional speed per joint ──────────────────
                     speeds = {}  # mid -> speed value
                     cycle_details = {}  # mid -> {pos, target, error, speed, ...} for logging
                     spd_min = TELEOP_SLOW_SPEED_MIN if teleop_slow_mode else TELEOP_SPEED_MIN
@@ -805,14 +1041,37 @@ def poll_loop():
                     for mid, target_pos in goals.items():
                         current_pos = f_board["positions"].get(mid, target_pos)
                         error = abs(target_pos - current_pos)
-                        leader_vel = 0  # velocity feedforward removed — read2ByteTxRx blocks loop
+
+                        # Adaptive gain: K adjusts based on tracking error history
+                        adapted_k = _adapt_gain(mid, error)
+
+                        # Velocity feedforward from leader position delta
+                        # (avoids blocking serial read — uses position difference instead)
+                        leader_vel = 0
+                        if mid in teleop_prev_pos:
+                            l_cur = l_board["positions"].get(mid, 0)
+                            # Approximate leader velocity from position change
+                            l_prev = getattr(_predict_collision, '_l_prev', {}).get(mid, l_cur)
+                            leader_vel = abs(l_cur - l_prev) if l_cur != l_prev else 0
+                            if not hasattr(_predict_collision, '_l_prev'):
+                                _predict_collision._l_prev = {}
+                            _predict_collision._l_prev[mid] = l_cur
+
                         speed = int(max(spd_min, min(spd_max,
-                                        TELEOP_SPEED_K * error + TELEOP_SPEED_FF * leader_vel)))
+                                        adapted_k * error + TELEOP_SPEED_FF * leader_vel)))
+
+                        # Predictive slowdown: cap speed if collision predicted
+                        if mid in teleop_predicted:
+                            speed = min(speed, spd_min + (spd_max - spd_min) // 4)
+
                         speeds[mid] = speed
                         name = ID_NAMES.get(mid, str(mid))
+                        derating = motor_fatigue.get(mid, {}).get("derating", 1.0)
                         cycle_details[name] = {
                             "pos": current_pos, "target": target_pos,
-                            "error": int(error), "speed": speed, "lvel": leader_vel,
+                            "error": int(error), "speed": speed,
+                            "lvel": leader_vel, "K": round(adapted_k, 2),
+                            "fatigue": round(derating, 2),
                         }
 
                     # Stash write data — actual serial writes happen outside the lock
@@ -863,14 +1122,19 @@ def poll_loop():
                                   "wrist_flex", "wrist_roll", "gripper"):
                         d = tw["cycle_details"].get(jname)
                         if d:
-                            parts.append(f"{jname[:4]}:e={d['error']:>4} s={d['speed']:>3}")
+                            k_val = d.get('K', '')
+                            k_str = f" K={k_val}" if k_val else ""
+                            parts.append(f"{jname[:4]}:e={d['error']:>4} s={d['speed']:>3}{k_str}")
                     skip_str = ""
                     if tw["skip_reasons"]:
                         skip_str = " SKIP:" + ",".join(f"{ID_NAMES.get(m,'?')}={r}" for m, r in tw["skip_reasons"].items())
                     col_str = ""
                     if teleop_collision:
                         col_str = " FROZEN:" + ",".join(ID_NAMES.get(m, '?') for m in teleop_collision)
-                    print(f"[teleop:{phase}] c={teleop_cycle_count} w={write_ok} {' | '.join(parts)}{skip_str}{col_str}", flush=True)
+                    pred_str = ""
+                    if teleop_predicted:
+                        pred_str = " PREDICT:" + ",".join(ID_NAMES.get(m, '?') for m in teleop_predicted)
+                    print(f"[teleop:{phase}] c={teleop_cycle_count} w={write_ok} {' | '.join(parts)}{skip_str}{col_str}{pred_str}", flush=True)
                 if teleop_equalizing and tw["all_equalized"] and teleop_eq_targets:
                     teleop_equalizing = False
                     pending_events.append(("teleop_tracking", {}))
@@ -882,6 +1146,24 @@ def poll_loop():
             # Adaptive learning: when a collision is confirmed, tighten cal limits
             if kind == "teleop_collision" and "name" in detail:
                 _learn_collision_limit(detail["name"], detail["frozen_at"])
+                # Reset collision-free counter for this joint
+                mid = detail.get("motor")
+                if mid is not None:
+                    collision_free_cycles[mid] = 0
+
+        # Collision-free cycle tracking + bidirectional learning
+        if teleop_active and not teleop_equalizing:
+            with state_lock:
+                f_port = assignment.get("follower")
+                f_ids = boards[f_port]["ids"] if f_port and f_port in boards else []
+            for mid in f_ids:
+                if mid not in teleop_collision and mid not in teleop_halted:
+                    collision_free_cycles[mid] = collision_free_cycles.get(mid, 0) + 1
+                    # Periodically try to loosen limits
+                    if collision_free_cycles[mid] % CAL_LOOSEN_MIN_CYCLES == 0:
+                        name = ID_NAMES.get(mid)
+                        if name:
+                            _loosen_collision_limits(mid, name)
 
         # Write shared state file at 2 Hz
         if now - last_state_write >= STATE_WRITE_INTERVAL:
@@ -2364,6 +2646,12 @@ def api_teleop_start():
         teleop_resync = {}
         teleop_cycle_count = 0
         teleop_log.clear()
+        # Reset cybernetic intelligence state for fresh session
+        teleop_adaptive_k.clear()
+        teleop_error_hist.clear()
+        teleop_load_hist.clear()
+        teleop_predicted.clear()
+        # Keep motor_fatigue and collision_free_cycles across sessions (persistent)
         # Equalization targets: map leader -> follower, clamped to safe range
         CAL_MARGIN = 0.05
         eq_targets = {}
@@ -2458,7 +2746,75 @@ def api_teleop_debug():
             "cal_loaded": {"leader": list(teleop_cal.get("leader", {}).keys()),
                            "follower": list(teleop_cal.get("follower", {}).keys())},
             "recent_log": teleop_log[-5:] if teleop_log else [],
+            "cybernetics": {
+                "adaptive_k": {ID_NAMES.get(m, str(m)): round(v, 2)
+                               for m, v in teleop_adaptive_k.items()},
+                "predicted_slowdown": [ID_NAMES.get(m, str(m)) for m in teleop_predicted],
+                "fatigue": {ID_NAMES.get(m, str(m)): {
+                    "derating": round(f.get("derating", 1.0), 2),
+                    "heat_integral": round(f.get("heat_integral", 0), 1),
+                } for m, f in motor_fatigue.items()},
+                "collision_free": {ID_NAMES.get(m, str(m)): v
+                                   for m, v in collision_free_cycles.items()},
+            },
         })
+
+
+@app.route("/api/cybernetics", methods=["GET"])
+def api_cybernetics():
+    """Return full cybernetic intelligence state — adaptive gains, predictions, fatigue, learning."""
+    with state_lock:
+        f_port = assignment.get("follower")
+        f_ids = boards[f_port]["ids"] if f_port and f_port in boards else []
+
+    result = {
+        "teleop_active": teleop_active,
+        "adaptive_gain": {},
+        "predictions": {},
+        "fatigue": {},
+        "collision_free_cycles": {},
+        "load_history": {},
+    }
+
+    for mid in f_ids:
+        name = ID_NAMES.get(mid, str(mid))
+
+        # Adaptive gain
+        k = teleop_adaptive_k.get(mid)
+        err_hist = list(teleop_error_hist.get(mid, []))
+        result["adaptive_gain"][name] = {
+            "current_k": round(k, 3) if k else TELEOP_SPEED_K,
+            "baseline_k": TELEOP_SPEED_K,
+            "error_avg_5": round(sum(err_hist[-5:]) / max(1, len(err_hist[-5:])), 1) if err_hist else 0,
+            "error_avg_all": round(sum(err_hist) / max(1, len(err_hist)), 1) if err_hist else 0,
+        }
+
+        # Predictions
+        predicted = mid in teleop_predicted
+        load_hist = list(teleop_load_hist.get(mid, []))
+        slope = 0
+        if len(load_hist) >= 3:
+            slope = round((load_hist[-1] - load_hist[-3]) / 2.0, 1)
+        result["predictions"][name] = {
+            "active": predicted,
+            "load_slope": slope,
+            "recent_loads": load_hist[-5:] if load_hist else [],
+        }
+
+        # Fatigue
+        f = motor_fatigue.get(mid, {})
+        eff_thresh = _get_effective_collision_threshold(mid)
+        result["fatigue"][name] = {
+            "heat_integral": round(f.get("heat_integral", 0), 1),
+            "derating": round(f.get("derating", 1.0), 3),
+            "effective_collision_threshold": eff_thresh,
+            "baseline_threshold": COLLISION_LOAD_THRESHOLD,
+        }
+
+        # Learning
+        result["collision_free_cycles"][name] = collision_free_cycles.get(mid, 0)
+
+    return jsonify(result)
 
 
 @app.route("/api/teleop/log", methods=["GET"])

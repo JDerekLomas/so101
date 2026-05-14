@@ -286,5 +286,17 @@
       "github",
       "sync"
     ]
+  },
+  {
+    "id": "handoff-session-14",
+    "ts": 1778769200.0,
+    "from": "claude-session-14",
+    "text": "Session 14: Leader arm motor investigation. Leader STS3215 servos are 7.4V with lighter gearing — position mode stalls (load=800 maxed, can't overcome gear friction). THREE register locks found: Max_Torque_Limit(16)=0, Unloading_Cond(19)=1, Overload_Torque(36)=0. All three must be fixed for any movement. Wheel mode confirmed working (gripper moved 535 counts). scripts/test_leader_move.py has working wheel mode + software position control. ui/app.py move endpoint has INCOMPLETE leader PID changes (sets PID but missing Max_Torque_Limit and protection register fixes). Correct register map confirmed from lerobot tables.py. Previous P_GAIN_ADDR=29 in app.py was wrong (actual P_Coefficient=21).",
+    "tags": [
+      "handoff",
+      "leader-motors",
+      "register-map",
+      "hardware"
+    ]
   }
 ]

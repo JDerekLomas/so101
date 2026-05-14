@@ -492,6 +492,22 @@ def get_workspace() -> dict:
 
 
 @mcp.tool()
+def get_cybernetics() -> dict:
+    """Get the cybernetic intelligence state — adaptive gains, predictive collision,
+    fatigue model, and bidirectional learning status.
+
+    Shows how the robot's control system is adapting in real-time:
+    - adaptive_gain: per-joint K values (grow when follower falls behind, decay when tracking well)
+    - predictions: load slope analysis — detects rising forces before collision
+    - fatigue: cumulative thermal stress derates collision thresholds for warm motors
+    - collision_free_cycles: progress toward loosening tightened calibration limits
+
+    No arguments needed. Returns the full cybernetic state snapshot.
+    """
+    return _get("/api/cybernetics")
+
+
+@mcp.tool()
 def search_conversations(query: str, max_results: int = 10) -> dict:
     """Search through conversation history (all Claude Code sessions with the user).
 
