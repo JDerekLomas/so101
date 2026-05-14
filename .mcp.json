@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "so101": {
+      "command": "/Users/dereklomas/lerobot-env-312/bin/python",
+      "args": ["/Users/dereklomas/so101/mcp_server.py"]
+    }
+  }
+}

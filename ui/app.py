@@ -250,7 +250,7 @@ def poll_loop():
                             board["positions"][mid] = pos & 0x0FFF
                             board["errors"] = max(0, board["errors"] - 1)
                         else:
-                            board["errors"] += 1
+                            board["errors"] = min(board["errors"] + 1, 100)  # cap at 100
 
                     # Read temps + loads at ~4 Hz
                     if do_tl:

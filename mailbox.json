@@ -3,8 +3,11 @@
     "id": "0c2eea53",
     "ts": 1778715678.9621508,
     "from": "claude-session-1",
-    "text": "Reorganized into ~/so101/. lerobot moved, editable install updated. motor_server running on :7777. Knowledge base at ~/so101/so101_knowledge_base.md. Follower only powered on so far — still need leader + range-of-motion pass.",
-    "tags": ["setup", "handoff"],
+    "text": "Reorganized into ~/so101/. lerobot moved, editable install updated. motor_server running on :7777. Knowledge base at ~/so101/so101_knowledge_base.md. Follower only powered on so far \u2014 still need leader + range-of-motion pass.",
+    "tags": [
+      "setup",
+      "handoff"
+    ],
     "done": true
   },
   {
@@ -12,7 +15,11 @@
     "ts": 1778715900.0,
     "from": "claude-session-2",
     "text": "Reorganization complete. scripts/ and ui/ layout confirmed. Shared state + mailbox wired. KB paths updated. Patches confirmed intact.",
-    "tags": ["reorganize", "shared-state", "handoff"],
+    "tags": [
+      "reorganize",
+      "shared-state",
+      "handoff"
+    ],
     "done": true
   },
   {
@@ -20,7 +27,60 @@
     "ts": 1778716160.0,
     "from": "claude-session-3",
     "text": "UI notification system complete. Server is ~/so101/ui/app.py on :5833. Fixed send_from_directory to use absolute STATIC_DIR so server can be launched from any working directory. Notification JS + panel added to index.html. SSE stream includes notifications[]. API: POST /api/notify, POST /api/notify/action, POST /api/notify/responses. Built-in triggers: cal_start, cal_stop, rescan, dismiss. User responses written to shared/messages/from_user/. Server confirmed serving HTML at http://localhost:5833. Test notification pushed (calibration needed). Still outstanding: leader arm not plugged in, neither arm has had range-of-motion calibration pass.",
-    "tags": ["ui", "notifications", "handoff"],
+    "tags": [
+      "ui",
+      "notifications",
+      "handoff"
+    ],
+    "done": true
+  },
+  {
+    "id": "6bff12aa",
+    "ts": 1778752910.96029,
+    "from": "claude-session-5",
+    "text": "Session 5 summary: (1) Wrote complete chat/server.py (506 lines) \u2014 Flask :8888, Anthropic streaming, agentic tool loop with 8 tools: check_motors, scan_motors, start/stop_teleoperate, start/save_calibration, read_calibration, run_shell. (2) Researched SO-101 community ecosystem in depth: 16k+ datasets, SmolVLA (450M, runs locally), ACT needs ~50 episodes, known wrist_roll calibration bug at raw pos 2048, phosphobot is closest prior art. (3) Found paper/outline.md already exists (132 lines) from a previous worker \u2014 good foundation. (4) Framed paper contribution: LLM agent in the bringup/development loop (not code gen, not policy inference) \u2014 gap in the literature. Key related work: Code as Policies, SayCan, Inner Monologue, SWE-bench. (5) ARMS STATUS: both USB ports detected (/dev/tty.usbmodem5B141123331 + 5B141116761) but servos not responding (comm=-6, RX timeout) \u2014 power supply not on during this session. Calibration still not done. (6) Next: power on arms, run lerobot calibration for both arms, test teleoperation, record first dataset episodes.",
+    "tags": [
+      "handoff",
+      "chat-server",
+      "paper",
+      "community-research",
+      "sync"
+    ],
+    "done": true
+  },
+  {
+    "id": "handoff-session-6",
+    "ts": 1778753000.0,
+    "from": "claude-session-6",
+    "text": "Session 6 summary: (1) Implemented 3-layer motor safety: position clamping to cal limits in /api/move, stall detection (load>800 for 6 consecutive reads \u2192 torque off), temp cutoff at 65\u00b0C. Safety state streams to UI (SAFE\u00b7OFF badge, amber border). (2) Fixed auto_scan port leak: empty_ports set tracks USB-alive/motor-dead ports, not re-probed every 3s. Leader shows 'USB connected - motor power off' in UI. (3) Full system diagnostic: follower healthy (6 motors, temps 28-33\u00b0C); leader USB alive but 0 motor response at any baud. Both uncalibrated joints: follower elbow_flex + wrist_roll (0-4095), leader wrist_roll (0-4095). (4) Current blocker: both arms showing 0 motors after user replug \u2014 likely cable reseating needed. (5) Session 5 artifacts confirmed: chat/server.py (:8888 Claude chat with 8 tools), paper/outline.md (strong foundation). (6) Paper data collection started: should track tool calls/session, time-to-resolution, git-track KB. (7) Action items: reseat motor cables on both arms, then run /api/move preset=middle to confirm follower, then calibrate elbow_flex+wrist_roll on follower, then bring up leader and calibrate wrist_roll.",
+    "tags": [
+      "handoff",
+      "safety",
+      "diagnostics",
+      "paper"
+    ],
+    "done": false
+  },
+  {
+    "id": "170e3b5e",
+    "ts": 1778754268.5892348,
+    "from": "claude-session-5",
+    "text": "Port assignments re-confirmed via wiggle test (2026-05-14): FOLLOWER=5B141123331, LEADER=5B141116761. These swap on every replug. Always wiggle-test at startup, never trust static config. motor_server.py updated to correct follower port. Wrote scripts/range_monitor.py: runs indefinitely, auto-identifies arms via 12s wiggle test, tracks min/max both arms, prints every 10s, saves to ~/so101/range_results.json on Ctrl+C. Follower direct writes not working (lock=1, volt=122 counts, further investigation needed). Leader reads fine. Motor server :7777 running on correct follower port, connected=true.",
+    "tags": [
+      "ports",
+      "wiggle-test",
+      "range-monitor",
+      "sync",
+      "handoff"
+    ],
+    "done": false
+  },
+  {
+    "id": "handoff-session-7",
+    "ts": 1778754300.0,
+    "from": "claude-session-7",
+    "text": "Session 7: (1) Built MCP server at mcp_server.py — 14 tools wrapping UI HTTP API: get_state, get_positions, move_joint, move_joints, move_to_middle, nudge_joint, rescan, assign_arm, start/stop/save/reset_calibration, get_events, notify_user. Config in .mcp.json. (2) Added SessionStart hook (.claude/hooks/session-sync.sh) — auto-injects session_log.jsonl, robot_state.json, mailbox.json, and service status into every new session. Config in settings.local.json. (3) Initialized git repo with initial commit (e8fb334, 21 files). (4) Created paper/outline.md — arXiv + blog structure. (5) Earlier in session: nudge_gripper.py confirmed working (gripper pos ~2400, +80 opens, -80 closes). (6) Next session should: restart Claude Code to pick up MCP server, test tools natively, then proceed with calibration.",
+    "tags": ["handoff", "mcp", "hooks", "git", "paper"],
     "done": false
   }
 ]

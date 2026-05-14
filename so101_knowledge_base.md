@@ -492,3 +492,37 @@ Directory-based message passing. No concurrent write conflicts.
 | LeRobot dataset analysis | https://www.kamenski.me/articles/analyzing-lerobot-datasets-on-hugging-face |
 | Seeed Studio GR00T N1.5 + Jetson Thor wiki | https://wiki.seeedstudio.com/fine_tune_gr00t_n1.5_for_lerobot_so_arm_and_deploy_on_jetson_thor |
 | Jetson AGX Orin setup guide | https://www.hackster.io/shahizat/running-lerobot-so-101-arm-kit-using-nvidia-jetson-agx-orin-19b8a4 |
+
+---
+
+## 9. Known Footguns
+
+### Port assignment is non-deterministic — easy to swap follower/leader
+
+Both controller boards share the same USB serial number. On every replug or power cycle, macOS may assign `/dev/tty.usbmodem5B141123331` and `/dev/tty.usbmodem5B141116761` to either arm — the assignment is arbitrary.
+
+**Confirmed mapping as of 2026-05-14 (wiggle test):**
+| Port | Arm |
+|------|-----|
+| `/dev/tty.usbmodem5B141116761` | **Follower** |
+| `/dev/tty.usbmodem5B141123331` | **Leader** |
+
+This will likely swap again on the next replug. **Always wiggle-test before trusting port labels.**
+
+**Wiggle test procedure:**
+1. Read positions from both ports in a loop
+2. Physically move one arm — the port showing position changes is that arm
+3. Update `motor_server.py` `PORT_PATH` and `chat/server.py` port constants if swapped
+
+**Safe move procedure (always):**
+1. Stop motor server (`pkill -f motor_server.py`) and wait 2 full seconds for port release
+2. Read current position before writing any goal
+3. Sanity-check the read — if it returns 0 with comm=0, do NOT write; the read is corrupt (port not fully released)
+4. Clamp target to a small delta from current (±100 steps max for a nudge)
+5. Keep torque enabled only during the move, disable immediately after
+
+**What went wrong 2026-05-14:**
+Motor server killed, port not released in time, first read returned 0 (corrupt), script wrote goal=50 (hard stop territory), triggered overload protection on the bus, all 6 motors went silent. Recovery: power cycle the arm.
+
+### wrist_roll calibration bug (LeRobot v0.5.x)
+LeRobot's calibration crashes with `ValueError: Magnitude exceeds 2047` if `wrist_roll` is not physically near raw position 2048 before starting. Rotate the joint manually to mid-range before running calibration.

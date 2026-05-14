@@ -27,7 +27,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from scservo_sdk import PortHandler, PacketHandler
 
-PORT_PATH   = "/dev/tty.usbmodem5B141123331"
+PORT_PATH   = "/dev/tty.usbmodem5B141123331"  # confirmed follower (wiggle test 2026-05-14 x2)
 HTTP_PORT   = 7777
 ADDR_POS    = 56
 NAMES       = {1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
@@ -59,6 +59,7 @@ log_buf = collections.deque(maxlen=1000)
 def reader_loop():
     port = PortHandler(PORT_PATH)
     handler = PacketHandler(0)
+    _devnull = open(os.devnull, "w")
     while True:
         if not port.is_open:
             if not port.openPort():
@@ -66,10 +67,16 @@ def reader_loop():
                 continue
             port.setBaudRate(1_000_000)
         positions = {}
-        for mid in range(1, 7):
-            val, comm, _ = handler.read2ByteTxRx(port, mid, ADDR_POS)
-            if comm == 0:
-                positions[NAMES[mid]] = val
+        import sys as _sys
+        _old_stderr = _sys.stderr
+        _sys.stderr = _devnull          # suppress SDK packet error spam
+        try:
+            for mid in range(1, 7):
+                val, comm, _ = handler.read2ByteTxRx(port, mid, ADDR_POS)
+                if comm == 0:
+                    positions[NAMES[mid]] = val
+        finally:
+            _sys.stderr = _old_stderr   # restore
         ts = time.time()
         with lock:
             state["connected"]   = bool(positions)
