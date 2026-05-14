@@ -1,0 +1,50 @@
+{
+  "_schema": "kb_context/v1",
+  "_updated": null,
+  "_note": "Written by the KB worker. Read by the robot tool for context and config.",
+
+  "hardware": {
+    "robot_model": "SO-101",
+    "motor_model": "Feetech STS3215",
+    "motor_count_per_arm": 6,
+    "default_baudrate": 1000000,
+    "usb_serial_issue": "Both controller boards share the same USB serial number. Port assignment is non-deterministic on macOS replug.",
+    "known_issues": [
+      {
+        "joint": "wrist_roll",
+        "description": "LeRobot hardcodes range 0-4095 but physical arm has limited range. Will hit mechanical stop.",
+        "fix": "Manually set range_min/range_max in calibration JSON after measuring actual limits."
+      },
+      {
+        "joint": "elbow_flex",
+        "description": "Currently calibrated 0-4095. Needs proper range sweep recalibration.",
+        "fix": "Run range calibration with calibrate tab in port_detector."
+      }
+    ]
+  },
+
+  "software": {
+    "python_env": "~/lerobot-env-312",
+    "lerobot_version": "0.5.2",
+    "lerobot_path": "~/so101/lerobot",
+    "workspace": "~/so101/robot-workspace",
+    "port_detector_url": "http://localhost:5833",
+    "motor_server_url": "http://localhost:7777"
+  },
+
+  "motor_ids": {
+    "1": "shoulder_pan",
+    "2": "shoulder_lift",
+    "3": "elbow_flex",
+    "4": "wrist_flex",
+    "5": "wrist_roll",
+    "6": "gripper"
+  },
+
+  "calibration_files": {
+    "follower": "~/.cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
+    "leader":   "~/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json"
+  },
+
+  "docs": {}
+}

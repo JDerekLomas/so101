@@ -1,0 +1,26 @@
+[
+  {
+    "id": "0c2eea53",
+    "ts": 1778715678.9621508,
+    "from": "claude-session-1",
+    "text": "Reorganized into ~/so101/. lerobot moved, editable install updated. motor_server running on :7777. Knowledge base at ~/so101/so101_knowledge_base.md. Follower only powered on so far — still need leader + range-of-motion pass.",
+    "tags": ["setup", "handoff"],
+    "done": true
+  },
+  {
+    "id": "handoff-session-2",
+    "ts": 1778715900.0,
+    "from": "claude-session-2",
+    "text": "Reorganization complete. scripts/ and ui/ layout confirmed. Shared state + mailbox wired. KB paths updated. Patches confirmed intact.",
+    "tags": ["reorganize", "shared-state", "handoff"],
+    "done": true
+  },
+  {
+    "id": "handoff-session-3",
+    "ts": 1778716160.0,
+    "from": "claude-session-3",
+    "text": "UI notification system complete. Server is ~/so101/ui/app.py on :5833. Fixed send_from_directory to use absolute STATIC_DIR so server can be launched from any working directory. Notification JS + panel added to index.html. SSE stream includes notifications[]. API: POST /api/notify, POST /api/notify/action, POST /api/notify/responses. Built-in triggers: cal_start, cal_stop, rescan, dismiss. User responses written to shared/messages/from_user/. Server confirmed serving HTML at http://localhost:5833. Test notification pushed (calibration needed). Still outstanding: leader arm not plugged in, neither arm has had range-of-motion calibration pass.",
+    "tags": ["ui", "notifications", "handoff"],
+    "done": false
+  }
+]

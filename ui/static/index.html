@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SO-101 Tool</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 28px 24px;
+  }
+
+  h1 { font-size: 1.3rem; font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .subtitle { color: #666; font-size: 0.85rem; margin-bottom: 24px; }
+
+  /* ---- tabs ---- */
+  .tabs { display: flex; gap: 4px; margin-bottom: 24px; }
+  .tab {
+    padding: 7px 18px; border-radius: 6px; cursor: pointer;
+    font-size: 0.88rem; font-weight: 500; border: none;
+    background: #1e1e1e; color: #888;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab.active { background: #2a2a2a; color: #fff; }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ---- boards grid ---- */
+  #boards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+
+  .board {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 18px; flex: 1; min-width: 260px; max-width: 400px;
+    transition: border-color 0.2s;
+  }
+  .board.leader   { border-color: #3b82f6; }
+  .board.follower { border-color: #22c55e; }
+
+  .board-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .port-name { font-family: monospace; font-size: 0.82rem; color: #aaa; }
+
+  .badge {
+    font-size: 0.72rem; font-weight: 600; padding: 3px 9px;
+    border-radius: 20px; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .badge.leader   { background: #1d4ed8; color: #bfdbfe; }
+  .badge.follower { background: #15803d; color: #bbf7d0; }
+  .badge.unset    { background: #2a2a2a; color: #555; }
+
+  .motor-count { font-size: 0.75rem; color: #555; margin-bottom: 10px; }
+
+  .motor-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
+  }
+  .motor-label { font-size: 0.78rem; color: #777; width: 106px; flex-shrink: 0; }
+
+  .bar-track {
+    flex: 1; height: 7px; background: #222; border-radius: 4px; overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%; border-radius: 4px; background: #3a3a3a;
+    transition: width 0.06s ease-out, background 0.15s;
+    width: 0%;
+  }
+  .bar-fill.moving { background: #60a5fa; }
+
+  .motor-val {
+    font-family: monospace; font-size: 0.75rem; color: #555;
+    width: 40px; text-align: right; flex-shrink: 0;
+  }
+
+  .assign-btns { display: flex; gap: 6px; margin-top: 14px; }
+
+  button {
+    cursor: pointer; border: none; border-radius: 6px;
+    padding: 7px 13px; font-size: 0.82rem; font-weight: 500;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.82; }
+  button:active { opacity: 0.65; }
+
+  .btn-leader   { background: #1d4ed8; color: #fff; }
+  .btn-follower { background: #15803d; color: #fff; }
+  .btn-muted    { background: #222; color: #666; }
+  .btn-primary  { background: #7c3aed; color: #fff; padding: 9px 20px; font-size: 0.9rem; }
+  .btn-danger   { background: #7f1d1d; color: #fca5a5; }
+
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+  #port-status, #cal-status {
+    font-size: 0.85rem; color: #666; margin-top: 2px;
+  }
+  .ok  { color: #22c55e !important; }
+  .err { color: #f87171 !important; }
+  .warn { color: #fbbf24 !important; }
+
+  /* ---- calibration panel ---- */
+  .cal-instructions {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 16px; margin-bottom: 20px; font-size: 0.88rem; line-height: 1.6; color: #aaa;
+  }
+  .cal-instructions strong { color: #fff; }
+
+  .cal-grid { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+
+  .cal-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 18px; flex: 1; min-width: 260px; max-width: 400px;
+  }
+  .cal-card h3 { font-size: 0.9rem; font-weight: 600; margin-bottom: 14px; color: #ccc; }
+  .cal-card.leader h3  { color: #93c5fd; }
+  .cal-card.follower h3 { color: #86efac; }
+
+  .cal-motor-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .cal-motor-label { font-size: 0.78rem; color: #777; width: 106px; flex-shrink: 0; }
+  .cal-range {
+    flex: 1; font-family: monospace; font-size: 0.78rem; color: #888;
+  }
+  .cal-range.has-data { color: #a3e635; }
+  .cal-spread {
+    font-family: monospace; font-size: 0.72rem; width: 52px;
+    text-align: right; flex-shrink: 0;
+  }
+  .cal-spread.good { color: #22c55e; }
+  .cal-spread.low  { color: #f59e0b; }
+  .cal-spread.none { color: #444; }
+
+  .recording-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #ef4444; margin-right: 6px;
+    animation: blink 1s step-start infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .no-boards { color: #444; font-size: 0.9rem; padding: 16px 0; }
+
+  /* ---- status tab ---- */
+  .status-arms { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+
+  .arm-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px;
+    padding: 18px; flex: 1; min-width: 260px; max-width: 420px;
+    transition: border-color 0.3s;
+  }
+  .arm-card.connected    { border-color: #22c55e; }
+  .arm-card.disconnected { border-color: #3f3f3f; opacity: 0.5; }
+  .arm-card.error        { border-color: #ef4444; }
+  .arm-card.safety       { border-color: #f59e0b; }
+  .arm-card.no-power     { border-color: #f59e0b; opacity: 0.75; }
+
+  .arm-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .arm-name { font-size: 1rem; font-weight: 600; color: #fff; }
+  .arm-port { font-family: monospace; font-size: 0.72rem; color: #555; margin-top: 2px; }
+
+  .conn-dot {
+    width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+    background: #333;
+  }
+  .conn-dot.ok      { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+  .conn-dot.err     { background: #ef4444; animation: blink 1s step-start infinite; }
+  .conn-dot.safe    { background: #f59e0b; box-shadow: 0 0 6px #f59e0b88; animation: blink 1s step-start infinite; }
+  .conn-dot.nopower { background: #f59e0b; opacity: 0.6; }
+
+  .motor-grid { margin-bottom: 12px; }
+
+  .motor-row-s {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .motor-name-s { font-size: 0.78rem; color: #777; width: 106px; flex-shrink: 0; }
+  .bar-track-s  { flex: 1; height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+  .bar-fill-s   {
+    height: 100%; border-radius: 3px; background: #3a3a3a;
+    transition: width 0.06s ease-out, background 0.15s;
+  }
+  .bar-fill-s.live     { background: #22c55e; }
+  .bar-fill-s.moving   { background: #60a5fa; }
+  .bar-fill-s.safe-off { background: #f59e0b; opacity: 0.5; }
+
+  .motor-row-s.safety-off .motor-name-s { color: #f59e0b; }
+
+  .motor-meta {
+    display: flex; gap: 6px; flex-shrink: 0;
+  }
+  .motor-pos   { font-family: monospace; font-size: 0.72rem; color: #555; width: 38px; text-align: right; }
+  .motor-temp  { font-family: monospace; font-size: 0.7rem; color: #888; width: 34px; text-align: right; }
+  .motor-temp.hot  { color: #f59e0b; }
+  .motor-temp.crit { color: #ef4444; }
+  .motor-load  { font-family: monospace; font-size: 0.7rem; color: #888; width: 34px; text-align: right; }
+  .motor-load.hot  { color: #f59e0b; }
+  .motor-load.crit { color: #ef4444; }
+  .safety-badge {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+    color: #f59e0b; background: #f59e0b22; border: 1px solid #f59e0b55;
+    border-radius: 3px; padding: 1px 4px;
+  }
+
+  .arm-footer { display: flex; gap: 16px; font-size: 0.72rem; color: #555; padding-top: 8px; border-top: 1px solid #222; }
+  .arm-footer span { display: flex; gap: 4px; align-items: center; }
+  .arm-footer b { color: #888; }
+
+  .status-events {
+    background: #141414; border: 1px solid #1e1e1e; border-radius: 8px;
+    padding: 12px 16px; max-height: 160px; overflow-y: auto;
+  }
+  .status-events h3 { font-size: 0.78rem; color: #555; font-weight: 500; margin-bottom: 8px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .event-row { font-size: 0.78rem; color: #666; padding: 3px 0; border-bottom: 1px solid #1a1a1a; display: flex; gap: 10px; }
+  .event-row:last-child { border-bottom: none; }
+  .event-ts   { color: #444; flex-shrink: 0; font-family: monospace; }
+  .event-kind { color: #888; }
+  .event-detail { color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---- notifications ---- */
+  #notif-panel {
+    position: fixed; bottom: 24px; right: 24px;
+    width: 340px; display: flex; flex-direction: column; gap: 10px;
+    z-index: 1000;
+  }
+  .notif-card {
+    background: #1e1e1e; border-radius: 10px; padding: 14px 16px;
+    border-left: 3px solid #555;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    animation: slideIn 0.2s ease-out;
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .notif-card.info           { border-left-color: #3b82f6; }
+  .notif-card.warning        { border-left-color: #f59e0b; }
+  .notif-card.action_request { border-left-color: #a78bfa; }
+  .notif-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .notif-title { font-size: 0.88rem; font-weight: 600; color: #fff; }
+  .notif-dismiss {
+    background: none; border: none; color: #555; cursor: pointer;
+    font-size: 1rem; padding: 0 0 0 8px; line-height: 1;
+  }
+  .notif-dismiss:hover { color: #aaa; opacity: 1; }
+  .notif-body   { font-size: 0.82rem; color: #aaa; line-height: 1.5; margin-bottom: 10px; }
+  .notif-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .notif-btn {
+    font-size: 0.78rem; padding: 5px 12px; border-radius: 5px;
+    background: #2a2a2a; color: #ccc; border: 1px solid #3a3a3a;
+  }
+  .notif-btn.primary { background: #4c1d95; color: #e9d5ff; border-color: #6d28d9; }
+  .notif-btn:hover { opacity: 0.8; }
+</style>
+</head>
+<body>
+
+<h1>SO-101</h1>
+<p class="subtitle" id="subtitle">Connecting…</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('status')">Status</button>
+  <button class="tab" onclick="switchTab('ports')">Ports</button>
+  <button class="tab" onclick="switchTab('calibrate')">Calibrate</button>
+</div>
+
+<!-- ============================================================ -->
+<!-- STATUS TAB                                                    -->
+<!-- ============================================================ -->
+<div id="panel-status" class="panel active">
+  <div id="status-arms" class="status-arms"></div>
+  <div id="status-events" class="status-events"></div>
+</div>
+
+<!-- ============================================================ -->
+<!-- PORTS TAB                                                     -->
+<!-- ============================================================ -->
+<div id="panel-ports" class="panel active">
+  <div id="boards"><p class="no-boards">Scanning…</p></div>
+  <div class="row">
+    <button class="btn-primary" onclick="savePorts()">Save to robot.env</button>
+    <button class="btn-muted" onclick="rescan()">Rescan</button>
+    <span id="port-status"></span>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- CALIBRATE TAB                                                 -->
+<!-- ============================================================ -->
+<div id="panel-calibrate" class="panel">
+  <div class="cal-instructions">
+    <strong>How to calibrate range:</strong> Assign leader/follower on the Ports tab first.
+    Click <strong>Start Recording</strong>, then move every joint on both arms through its
+    full range of motion — all the way to each mechanical stop. When done, click
+    <strong>Stop &amp; Save</strong>. Only <code>range_min</code> and <code>range_max</code>
+    are updated; homing offsets and IDs are untouched.
+  </div>
+
+  <div class="row" style="margin-bottom: 20px;">
+    <button class="btn-primary" id="btn-cal-start" onclick="calStart()">Start Recording</button>
+    <button class="btn-muted"   id="btn-cal-reset" onclick="calReset()">Reset</button>
+    <button class="btn-muted"   id="btn-cal-stop"  onclick="calStop()" style="display:none">Stop</button>
+    <button class="btn-primary" id="btn-cal-save"  onclick="calSave()" style="display:none">Stop &amp; Save</button>
+    <span id="cal-status"></span>
+  </div>
+
+  <div id="cal-grid" class="cal-grid">
+    <p class="no-boards">Assign arms on the Ports tab, then start recording.</p>
+  </div>
+</div>
+
+<script>
+const ID_NAMES = {
+  1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
+  4: "wrist_flex",   5: "wrist_roll",    6: "gripper",
+};
+
+let prevPositions = {};
+let lastSnapshot  = {};
+let lastCal       = { active: false, ranges: {} };
+
+// ---------------------------------------------------------------- //
+// Tabs                                                              //
+// ---------------------------------------------------------------- //
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach((t, i) => {
+    t.classList.toggle("active", ["status","ports","calibrate"][i] === name);
+  });
+  document.querySelectorAll(".panel").forEach(p => {
+    p.classList.toggle("active", p.id === "panel-" + name);
+  });
+}
+
+// ---------------------------------------------------------------- //
+// Status tab                                                        //
+// ---------------------------------------------------------------- //
+const ARM_ROLES = ["follower", "leader"];
+const prevPos   = {};
+
+function renderStatus(snapshot, events, emptyPorts) {
+  const container = document.getElementById("status-arms");
+  emptyPorts = emptyPorts || [];
+
+  // Build role→board map; fall back to port label if unassigned
+  const roleMap = {};
+  Object.entries(snapshot).forEach(([port, data]) => {
+    const role = data.label || port;
+    roleMap[role] = { port, ...data };
+  });
+
+  // Always show follower + leader slots; fill with data if available
+  const slots = ARM_ROLES.map(role => ({
+    role,
+    data: roleMap[role] || null,
+  }));
+  // Add any unassigned boards
+  Object.entries(snapshot).forEach(([port, data]) => {
+    if (!data.label) slots.push({ role: port, data: { port, ...data } });
+  });
+
+  // Update subtitle
+  const connected = slots.filter(s => s.data && s.data.errors < 20).length;
+  document.getElementById("subtitle").textContent =
+    connected ? `${connected} arm${connected > 1 ? "s" : ""} connected` : "No arms connected";
+
+  slots.forEach(({ role, data }) => {
+    const cardId = "scard-" + role;
+    let card = document.getElementById(cardId);
+    if (!card) {
+      card = document.createElement("div");
+      card.id = cardId;
+      container.appendChild(card);
+    }
+
+    if (!data) {
+      // Check if this role's port is in empty_ports (USB alive, motor power off)
+      const emptyPort = emptyPorts.find(p => p.includes(role === "leader" ? "116761" : "123331"));
+      if (emptyPort) {
+        card.className = "arm-card no-power";
+        card.innerHTML = `
+          <div class="arm-header">
+            <div><div class="arm-name">${role.charAt(0).toUpperCase()+role.slice(1)}</div>
+            <div class="arm-port">${emptyPort}</div></div>
+            <div class="conn-dot nopower"></div>
+          </div>
+          <p style="font-size:0.8rem;color:#f59e0b;margin-top:8px;">USB connected — motor power off.<br>Turn on the DC power supply.</p>`;
+      } else {
+        card.className = "arm-card disconnected";
+        card.innerHTML = `
+          <div class="arm-header">
+            <div><div class="arm-name">${role}</div><div class="arm-port">not connected</div></div>
+            <div class="conn-dot"></div>
+          </div>
+          <p style="font-size:0.8rem;color:#444;margin-top:8px;">Plug in arm and wait for auto-detect.</p>`;
+      }
+      return;
+    }
+
+    const ids             = data.ids || [];
+    const pos             = data.positions || {};
+    const temps           = data.temps || {};
+    const loads           = data.loads || {};
+    const safetyDisabled  = data.safety_disabled || {};
+    const errors          = data.errors || 0;
+    const isConn          = errors < 20;
+    const hasError        = errors >= 20;
+
+    if (!prevPos[role]) prevPos[role] = {};
+
+    const motorsHtml = ids.map(id => {
+      const val    = pos[String(id)] ?? 0;
+      const prev   = prevPos[role][id] ?? val;
+      const moving = Math.abs(val - prev) > 8;
+      prevPos[role][id] = val;
+
+      const temp     = temps[String(id)];
+      const tempText = temp != null ? `${temp}°` : "";
+      const tempCls  = temp == null ? "" : temp >= 65 ? "crit" : temp >= 50 ? "hot" : "";
+
+      const load      = loads[String(id)];
+      const loadPct   = load != null ? Math.round(load / 1023 * 100) : 0;
+      const loadCls   = load == null ? "" : load > 800 ? "crit" : load > 500 ? "hot" : "";
+      const loadText  = load != null ? `${loadPct}%` : "";
+
+      const safeDis   = safetyDisabled[String(id)];
+
+      return `<div class="motor-row-s${safeDis ? " safety-off" : ""}">
+        <span class="motor-name-s">${ID_NAMES[id] || "motor "+id}</span>
+        <div class="bar-track-s"><div class="bar-fill-s ${safeDis ? "safe-off" : moving ? "moving" : isConn ? "live" : ""}" style="width:${pct(val)}%"></div></div>
+        <div class="motor-meta">
+          <span class="motor-pos">${val}</span>
+          ${safeDis ? `<span class="safety-badge">SAFE·OFF</span>` :
+            `<span class="motor-load ${loadCls}">${loadText}</span>
+             <span class="motor-temp ${tempCls}">${tempText}</span>`}
+        </div>
+      </div>`;
+    }).join("");
+
+    const motorCount  = ids.length;
+    const anySafeOff  = Object.values(safetyDisabled).some(Boolean);
+    const connCls     = hasError ? "err" : isConn ? "ok" : "";
+    const cardCls     = anySafeOff ? "safety" : hasError ? "error" : isConn ? "connected" : "disconnected";
+
+    card.className = `arm-card ${cardCls}`;
+    card.innerHTML = `
+      <div class="arm-header">
+        <div>
+          <div class="arm-name">${role.charAt(0).toUpperCase()+role.slice(1)}</div>
+          <div class="arm-port">${data.port || ""}</div>
+        </div>
+        <div class="conn-dot ${anySafeOff ? "safe" : connCls}"></div>
+      </div>
+      <div class="motor-grid">${motorsHtml || '<p style="color:#444;font-size:0.8rem">No motors responding</p>'}</div>
+      <div class="arm-footer">
+        <span><b>${motorCount}</b> motors</span>
+        <span><b>${errors}</b> pkt errors</span>
+        ${anySafeOff ? `<span style="color:#f59e0b">⚠ safety tripped</span>` : ""}
+      </div>`;
+  });
+
+  // Remove cards for gone ports
+  container.querySelectorAll(".arm-card").forEach(card => {
+    const role = card.id.replace("scard-", "");
+    const stillExists = slots.some(s => s.role === role);
+    if (!stillExists) card.remove();
+  });
+
+  // Events log
+  if (events && events.length) {
+    const evEl = document.getElementById("status-events");
+    evEl.innerHTML = `<h3>Events</h3>` + [...events].reverse().map(e => {
+      const t   = new Date(e.ts * 1000).toLocaleTimeString();
+      const det = typeof e.detail === "object" ? JSON.stringify(e.detail) : String(e.detail || "");
+      return `<div class="event-row">
+        <span class="event-ts">${t}</span>
+        <span class="event-kind">${e.kind}</span>
+        <span class="event-detail">${det}</span>
+      </div>`;
+    }).join("");
+  }
+}
+
+// ---------------------------------------------------------------- //
+// SSE stream                                                        //
+// ---------------------------------------------------------------- //
+const es = new EventSource("/stream");
+es.onmessage = e => {
+  try {
+    const data = JSON.parse(e.data);
+    lastSnapshot = data.boards || {};
+    lastCal      = data.cal    || { active: false, ranges: {} };
+    renderStatus(lastSnapshot, data.events || [], data.empty_ports || []);
+    renderBoards(lastSnapshot);
+    renderCal(lastCal, lastSnapshot);
+    if (data.notifications) renderNotifications(data.notifications);
+  } catch {}
+};
+es.onerror = () => setStatus("port", "Stream disconnected.", "err");
+
+// ---------------------------------------------------------------- //
+// Boards rendering                                                  //
+// ---------------------------------------------------------------- //
+function pct(v) { return ((v / 4095) * 100).toFixed(1); }
+
+function renderBoards(snapshot) {
+  const container = document.getElementById("boards");
+  const ports = Object.keys(snapshot);
+
+  if (!ports.length) {
+    container.innerHTML = '<p class="no-boards">No boards detected. Connect arms and click Rescan.</p>';
+    return;
+  }
+
+  ports.forEach(port => {
+    const data  = snapshot[port];
+    const label = data.label || "unset";
+    let card = document.getElementById("card-" + CSS.escape(port));
+    if (!card) {
+      card = document.createElement("div");
+      card.id = "card-" + CSS.escape(port);
+      container.appendChild(card);
+    }
+    card.className = "board " + label;
+
+    const ids       = data.ids       || [];
+    const positions = data.positions || {};
+    if (!prevPositions[port]) prevPositions[port] = {};
+
+    const motorsHtml = ids.map(id => {
+      const val  = positions[String(id)] ?? 0;
+      const prev = prevPositions[port][id] ?? val;
+      const moving = Math.abs(val - prev) > 8;
+      prevPositions[port][id] = val;
+      return `<div class="motor-row">
+        <span class="motor-label">${ID_NAMES[id] || "motor "+id}</span>
+        <div class="bar-track"><div class="bar-fill ${moving ? "moving" : ""}" style="width:${pct(val)}%"></div></div>
+        <span class="motor-val">${val}</span>
+      </div>`;
+    }).join("");
+
+    card.innerHTML = `
+      <div class="board-header">
+        <span class="port-name">${port}</span>
+        <span class="badge ${label}">${label === "unset" ? "unassigned" : label}</span>
+      </div>
+      <div class="motor-count">${ids.length} motor${ids.length !== 1 ? "s" : ""} responding</div>
+      <div class="motors">${motorsHtml}</div>
+      <div class="assign-btns">
+        <button class="btn-leader"   onclick="assign('${port}','leader')">Leader</button>
+        <button class="btn-follower" onclick="assign('${port}','follower')">Follower</button>
+        <button class="btn-muted"    onclick="assign('${port}','clear')">Clear</button>
+      </div>`;
+  });
+
+  // Remove stale cards
+  container.querySelectorAll(".board").forEach(card => {
+    const port = decodeURIComponent(card.id.replace("card-", ""));
+    if (!snapshot[port]) card.remove();
+  });
+}
+
+// ---------------------------------------------------------------- //
+// Calibration rendering                                             //
+// ---------------------------------------------------------------- //
+function renderCal(cal, snapshot) {
+  const grid    = document.getElementById("cal-grid");
+  const btnSave = document.getElementById("btn-cal-save");
+  const btnStop = document.getElementById("btn-cal-stop");
+  const btnStart= document.getElementById("btn-cal-start");
+
+  // Gather assigned roles
+  const roles = {};
+  Object.entries(snapshot).forEach(([port, data]) => {
+    if (data.label === "leader" || data.label === "follower") {
+      roles[data.label] = { port, ids: data.ids || [] };
+    }
+  });
+
+  if (!Object.keys(roles).length) {
+    grid.innerHTML = '<p class="no-boards">Assign arms on the Ports tab, then start recording.</p>';
+    return;
+  }
+
+  // Update recording button visibility
+  if (cal.active) {
+    btnStart.style.display = "none";
+    btnStop.style.display  = "";
+    btnSave.style.display  = "";
+  } else {
+    btnStart.style.display = "";
+    btnStop.style.display  = "none";
+    btnSave.style.display  = Object.keys(cal.ranges).length ? "" : "none";
+  }
+
+  // Build cards
+  const orderedRoles = ["follower", "leader"].filter(r => roles[r]);
+  orderedRoles.forEach(role => {
+    const { ids } = roles[role];
+    let card = document.getElementById("cal-card-" + role);
+    if (!card) {
+      card = document.createElement("div");
+      card.id = "cal-card-" + role;
+      grid.appendChild(card);
+    }
+    card.className = "cal-card " + role;
+
+    const title = cal.active
+      ? `<span class="recording-dot"></span>${role.charAt(0).toUpperCase() + role.slice(1)}`
+      : role.charAt(0).toUpperCase() + role.slice(1);
+
+    const motorsHtml = ids.map(id => {
+      const r      = (cal.ranges[role] || {})[String(id)];
+      const spread = r ? r.max - r.min : -1;
+      const hasData = r && spread >= 0;
+      const spreadClass = !hasData ? "none" : spread >= 50 ? "good" : "low";
+      const rangeText   = hasData ? `${r.min} – ${r.max}` : "—";
+      const spreadText  = hasData ? `${spread}` : "—";
+      return `<div class="cal-motor-row">
+        <span class="cal-motor-label">${ID_NAMES[id] || "motor "+id}</span>
+        <span class="cal-range ${hasData ? "has-data" : ""}">${rangeText}</span>
+        <span class="cal-spread ${spreadClass}">${spreadText}</span>
+      </div>`;
+    }).join("");
+
+    card.innerHTML = `<h3>${title}</h3>${motorsHtml}`;
+  });
+
+  // Remove cards for roles that disappeared
+  ["follower","leader"].forEach(role => {
+    if (!roles[role]) {
+      const old = document.getElementById("cal-card-" + role);
+      if (old) old.remove();
+    }
+  });
+}
+
+// ---------------------------------------------------------------- //
+// Port actions                                                      //
+// ---------------------------------------------------------------- //
+async function assign(port, role) {
+  await fetch("/api/assign", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({port, role}),
+  });
+}
+
+async function savePorts() {
+  setStatus("port", "Saving…", "");
+  const res  = await fetch("/api/save-ports", { method: "POST" });
+  const data = await res.json();
+  if (data.ok) {
+    setStatus("port", `Saved — follower: ${data.follower}  |  leader: ${data.leader}`, "ok");
+  } else {
+    setStatus("port", "Error: " + data.error, "err");
+  }
+}
+
+async function rescan() {
+  setStatus("port", "Rescanning…", "");
+  document.getElementById("boards").innerHTML = '<p class="no-boards">Scanning…</p>';
+  const res  = await fetch("/api/rescan", { method: "POST" });
+  const data = await res.json();
+  setStatus("port", `Found ${data.count} board${data.count !== 1 ? "s" : ""}.`, "");
+}
+
+// ---------------------------------------------------------------- //
+// Calibration actions                                               //
+// ---------------------------------------------------------------- //
+async function calStart() {
+  await fetch("/api/cal/start", { method: "POST" });
+  setStatus("cal", "Recording… move all joints through full range.", "warn");
+}
+
+async function calReset() {
+  await fetch("/api/cal/reset", { method: "POST" });
+  setStatus("cal", "Ranges cleared.", "");
+}
+
+async function calStop() {
+  await fetch("/api/cal/stop", { method: "POST" });
+  setStatus("cal", "Stopped. Review ranges below, then Save.", "");
+}
+
+async function calSave() {
+  await fetch("/api/cal/stop", { method: "POST" });
+  setStatus("cal", "Saving…", "");
+  const res  = await fetch("/api/cal/save", { method: "POST" });
+  const data = await res.json();
+  if (!data.ok) { setStatus("cal", "Error: " + data.error, "err"); return; }
+
+  const parts = [];
+  if (data.saved.length)   parts.push("Saved: " + data.saved.join(", "));
+  if (data.skipped.length) parts.push("Skipped: " + data.skipped.join("; "));
+  if (data.warnings.length) parts.push("⚠ " + data.warnings.join("; "));
+  setStatus("cal", parts.join("  |  ") || "Done.", data.warnings.length ? "warn" : "ok");
+}
+
+// ---------------------------------------------------------------- //
+// Helpers                                                           //
+// ---------------------------------------------------------------- //
+function setStatus(which, msg, cls) {
+  const el = document.getElementById(which + "-status");
+  el.textContent = msg;
+  el.className   = cls;
+}
+
+// ---------------------------------------------------------------- //
+// Notifications                                                     //
+// ---------------------------------------------------------------- //
+const renderedNotifs = new Set();
+
+function renderNotifications(notifs) {
+  const panel = document.getElementById("notif-panel");
+  notifs.forEach(n => {
+    if (renderedNotifs.has(n.id)) return;
+    renderedNotifs.add(n.id);
+    const card = document.createElement("div");
+    card.className = `notif-card ${n.type || "info"}`;
+    card.id = "notif-" + n.id;
+    const actionsHtml = (n.actions || []).map(a =>
+      `<button class="notif-btn ${a.trigger === 'dismiss' ? '' : 'primary'}"
+        onclick="notifAction('${n.id}','${a.trigger}')">${a.label}</button>`
+    ).join("");
+    card.innerHTML = `
+      <div class="notif-header">
+        <span class="notif-title">${n.title || ""}</span>
+        <button class="notif-dismiss" onclick="dismissNotif('${n.id}')">✕</button>
+      </div>
+      ${n.body ? `<div class="notif-body">${n.body}</div>` : ""}
+      ${actionsHtml ? `<div class="notif-actions">${actionsHtml}</div>` : ""}`;
+    panel.appendChild(card);
+  });
+}
+
+async function dismissNotif(id) {
+  document.getElementById("notif-" + id)?.remove();
+  await fetch("/api/notify/dismiss", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id}),
+  });
+}
+
+async function notifAction(id, trigger) {
+  document.getElementById("notif-" + id)?.remove();
+  await fetch("/api/notify/action", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id, trigger}),
+  });
+}
+</script>
+
+<div id="notif-panel"></div>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "_schema": "robot_state/v1",
+  "_updated": 1778752725.679536,
+  "connection": {},
+  "motors": {
+    "follower": {},
+    "leader": {}
+  },
+  "calibration": {
+    "recording": false,
+    "follower_file": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/robots/so_follower/my_follower.json",
+    "leader_file": "/Users/dereklomas/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
+    "last_saved": null
+  },
+  "events": [
+    {
+      "ts": 1778723222.104238,
+      "kind": "disconnected",
+      "detail": {
+        "port": "/dev/tty.usbmodem5B141123331",
+        "role": null
+      }
+    },
+    {
+      "ts": 1778752635.0602329,
+      "kind": "scan_complete",
+      "detail": {
+        "board_count": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# LeRobot (large, installed as editable — track separately)
+lerobot/
+
+# Logs and temp
+motor_log.jsonl
+*.log
+
+# Environment
+.env
+robot.env
+
+# OS
+.DS_Store
+
+# Shared state (live telemetry, not source)
+shared/messages/to_user/*.json
+shared/messages/from_user/*.json
+shared/messages/to_robot/*.json
+shared/messages/to_kb/*.json
